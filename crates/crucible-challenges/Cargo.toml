@@ -1,0 +1,20 @@
+[package]
+name = "crucible-challenges"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Challenge verifier implementations: image-classify, semantic-similarity, audio-transcribe, math-arithmetic, drawing-reconstruct, prompt-injection-detect."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+crucible-core = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"

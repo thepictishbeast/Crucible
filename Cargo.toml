@@ -1,0 +1,45 @@
+# Crucible — bot-screening + LFI training-data generation
+#
+# Crucible is a multi-modal challenge platform that serves two
+# purposes from the same interaction:
+#
+#   1. Stop bots by asking them to do tasks humans find easy
+#      and machines find hard (or expensive).
+#   2. Every human-solved challenge produces a labeled
+#      (challenge, human_response, ground_truth) tuple that
+#      flows into PlausiDen-LFI's corpus. The bot-gate IS the
+#      training-data pipeline.
+#
+# This is the inversion that makes Crucible different from
+# reCAPTCHA / hCaptcha / Cloudflare Turnstile: the data we
+# capture trains OUR open-source AI, not a third party's.
+#
+# Embeddable on Sacred.Vote, plausiden.com, prosperityclub.com,
+# and any client site via a typed widget + per-tenant config.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/crucible-core",
+    "crates/crucible-challenges",
+    "crates/crucible-corpus",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.78"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thepictishbeast/Crucible"
+
+[workspace.dependencies]
+crucible-core       = { path = "crates/crucible-core" }
+crucible-challenges = { path = "crates/crucible-challenges" }
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "2"
+time       = { version = "0.3", features = ["serde", "macros"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
