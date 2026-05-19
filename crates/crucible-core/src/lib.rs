@@ -117,9 +117,11 @@ pub struct Challenge {
     /// render + verify it.
     pub payload: serde_json::Value,
     /// When the challenge was issued (RFC 3339).
+    #[serde(with = "time::serde::rfc3339")]
     pub issued_at: time::OffsetDateTime,
     /// Issuer-supplied expiry. Solutions submitted after this
     /// are auto-rejected.
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: time::OffsetDateTime,
     /// Tenant id this challenge was served for.
     pub tenant_id: String,
