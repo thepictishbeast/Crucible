@@ -223,6 +223,9 @@ fn render_challenge_form(
         "image-classify" => {
             render_picks_form(document, mount, challenge, base_path, PicksKind::Image)?
         }
+        "audio-transcribe" => {
+            render_audio_form(document, mount, challenge, base_path)?
+        }
         other => {
             let p = document.create_element("p")?;
             p.set_text_content(Some(&format!(
@@ -561,6 +564,119 @@ fn collect_picks(mount: &web_sys::Element) -> Result<Vec<i64>, JsValue> {
         }
     }
     Ok(out)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_audio_form(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge: &crucible_core::Challenge,
+    base_path: &str,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    let audio_url = challenge
+        .payload
+        .get("audio_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let heading = document.create_element("p")?;
+    heading.set_text_content(Some("Listen and type what you hear:"));
+    mount.append_child(&heading)?;
+
+    let audio: web_sys::HtmlAudioElement = document
+        .create_element("audio")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("audio cast"))?;
+    audio.set_src(audio_url);
+    audio.set_controls(true);
+    audio.set_attribute("preload", "metadata")?;
+    mount.append_child(&audio)?;
+
+    let input: web_sys::HtmlInputElement = document
+        .create_element("input")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("input cast"))?;
+    input.set_type("text");
+    input.set_id("crucible-audio-transcript");
+    input.set_attribute("autocomplete", "off")?;
+    input.set_attribute("spellcheck", "false")?;
+    mount.append_child(&input)?;
+
+    let button: web_sys::HtmlButtonElement = document
+        .create_element("button")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("button cast"))?;
+    button.set_text_content(Some("Submit"));
+    mount.append_child(&button)?;
+
+    let status = document.create_element("p")?;
+    status.set_id("crucible-status");
+    mount.append_child(&status)?;
+
+    let load_time_ms = now_ms_or_zero();
+    let challenge_id = challenge.id.clone();
+    let mount_clone = mount.clone();
+    let document_clone = document.clone();
+    let base_path = base_path.to_owned();
+
+    let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+        let challenge_id = challenge_id.clone();
+        let mount = mount_clone.clone();
+        let document = document_clone.clone();
+        let base_path = base_path.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) =
+                submit_audio(&document, &mount, &challenge_id, &base_path, load_time_ms).await
+            {
+                let _ = update_status(&document, &mount, &format!("Error: {e:?}"));
+            }
+        });
+    }) as Box<dyn FnMut()>);
+    button.set_onclick(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn submit_audio(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge_id: &str,
+    base_path: &str,
+    load_time_ms: f64,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    let input: web_sys::HtmlInputElement = document
+        .get_element_by_id("crucible-audio-transcript")
+        .ok_or_else(|| JsValue::from_str("no transcript input"))?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("input cast"))?;
+    let transcript = input.value();
+    let elapsed_ms = (now_ms_or_zero() - load_time_ms).max(0.0) as u32;
+    let submitted_at = now_iso_utc();
+    let body = build_solve_request_json(
+        challenge_id,
+        serde_json::json!({"transcript": transcript}),
+        &submitted_at,
+        elapsed_ms,
+    );
+    let url = join_url(base_path, "solve");
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let resp = fetch_json(&window, &url, &body).await?;
+    let parsed: SolveResponseBody = serde_wasm_bindgen::from_value(resp)
+        .map_err(|e| JsValue::from_str(&format!("parse verdict: {e}")))?;
+    update_status(document, mount, &verdict_summary(&parsed.verdict))?;
+
+    let event_init = web_sys::CustomEventInit::new();
+    let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
+    event_init.set_detail(&detail);
+    let event = web_sys::CustomEvent::new_with_event_init_dict(
+        "crucible-verdict",
+        &event_init,
+    )?;
+    mount.dispatch_event(&event)?;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
