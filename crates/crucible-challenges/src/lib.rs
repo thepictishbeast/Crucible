@@ -107,8 +107,40 @@ impl Verifier for ImageClassifyVerifier {
     }
 }
 
-/// Semantic-similarity verifier — stub.
+/// Semantic-similarity verifier — set-overlap impl.
+///
+/// Payload shape: `{"prompt": "<word>", "options": ["<w>", ...],
+/// "truth_indices": [<i>, <i>, ...]}`. The user submits
+/// `{"picks": [<i>, <i>, ...]}`. The verifier compares picks
+/// against the curator-authored truth_indices via F1-score:
+/// * F1 ≥ 0.9 + non-trivial elapsed → Human (confidence = F1)
+/// * F1 ≥ 0.5 → Inconclusive (retry one difficulty harder)
+/// * F1 < 0.5 → Bot (confidence = 1.0 - F1)
+///
+/// Curator-authored ground truth is the v1 design — embedding-
+/// model-based similarity is an LFI-side capability (filed at
+/// PlausiDen-LFI when the corpus is rich enough to train one).
+/// For now the curator picks the canonical similar set per
+/// prompt; bot-vs-human discrimination is the F1 + the elapsed-
+/// time signal, not the embedding quality.
+///
+/// Too-fast bound mirrors MathArithmetic: solutions submitted in
+/// < 600ms after the user could parse the options are treated
+/// as scripted regardless of correctness.
 pub struct SemanticSimilarityVerifier;
+
+impl SemanticSimilarityVerifier {
+    /// Minimum elapsed-ms a real human needs to read the prompt
+    /// + the option list. Anything faster is scripted.
+    pub const MIN_ELAPSED_MS: u32 = 600;
+    /// F1 threshold above which the solver is judged human (assuming
+    /// the elapsed-ms gate also passed).
+    pub const HUMAN_F1: f64 = 0.9;
+    /// F1 threshold above which we're uncertain enough to retry at
+    /// higher difficulty rather than verdict directly.
+    pub const INCONCLUSIVE_F1: f64 = 0.5;
+}
+
 impl Verifier for SemanticSimilarityVerifier {
     fn kind(&self) -> ChallengeKind {
         ChallengeKind::SemanticSimilarity
@@ -116,9 +148,69 @@ impl Verifier for SemanticSimilarityVerifier {
     fn verify(
         &self,
         challenge: &Challenge,
-        _solution: &Solution,
+        solution: &Solution,
     ) -> Result<(Verdict, serde_json::Value), CrucibleError> {
-        Ok((inconclusive(challenge), serde_json::Value::Null))
+        let truth_arr = challenge
+            .payload
+            .get("truth_indices")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing truth_indices".into()))?;
+        let truth: std::collections::BTreeSet<i64> = truth_arr
+            .iter()
+            .filter_map(|v| v.as_i64())
+            .collect();
+        if truth.is_empty() {
+            return Err(CrucibleError::MalformedSolution(
+                "truth_indices empty".into(),
+            ));
+        }
+        let picks_arr = solution
+            .response
+            .get("picks")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing picks".into()))?;
+        let picks: std::collections::BTreeSet<i64> = picks_arr
+            .iter()
+            .filter_map(|v| v.as_i64())
+            .collect();
+
+        let gt = serde_json::json!({"truth_indices": truth_arr});
+
+        // F1 = 2 * precision * recall / (precision + recall).
+        // Empty picks → F1 = 0 (zero recall).
+        let tp = truth.intersection(&picks).count() as f64;
+        let fp = picks.difference(&truth).count() as f64;
+        let fn_ = truth.difference(&picks).count() as f64;
+        let f1 = if tp == 0.0 {
+            0.0
+        } else {
+            let p = tp / (tp + fp);
+            let r = tp / (tp + fn_);
+            2.0 * p * r / (p + r)
+        };
+
+        if solution.elapsed_ms < Self::MIN_ELAPSED_MS {
+            return Ok((
+                Verdict::Bot {
+                    confidence: 0.85,
+                    reason: Some("too-fast".into()),
+                },
+                gt,
+            ));
+        }
+        if f1 >= Self::HUMAN_F1 {
+            return Ok((Verdict::Human { confidence: f1 as f32 }, gt));
+        }
+        if f1 >= Self::INCONCLUSIVE_F1 {
+            return Ok((inconclusive(challenge), gt));
+        }
+        Ok((
+            Verdict::Bot {
+                confidence: (1.0 - f1) as f32,
+                reason: Some("low-overlap".into()),
+            },
+            gt,
+        ))
     }
 }
 
@@ -342,7 +434,6 @@ mod tests {
         let r = registry();
         for k in [
             ChallengeKind::ImageClassify,
-            ChallengeKind::SemanticSimilarity,
             ChallengeKind::AudioTranscribe,
             ChallengeKind::DrawingReconstruct,
             ChallengeKind::PromptInjectionDetect,
@@ -355,5 +446,80 @@ mod tests {
                 "{k:?} should be inconclusive in stub state"
             );
         }
+    }
+
+    fn sim_challenge() -> Challenge {
+        challenge(
+            ChallengeKind::SemanticSimilarity,
+            serde_json::json!({
+                "prompt": "happy",
+                "options": ["joyful", "sad", "elated", "purple", "blue"],
+                "truth_indices": [0, 2]
+            }),
+        )
+    }
+
+    #[test]
+    fn semantic_similarity_exact_match_is_human() {
+        let r = registry();
+        let s = solution(serde_json::json!({"picks": [0, 2]}), 4_000);
+        let (v, gt) = r.verify(&sim_challenge(), &s).unwrap();
+        assert!(matches!(v, Verdict::Human { .. }));
+        assert_eq!(gt, serde_json::json!({"truth_indices": [0, 2]}));
+    }
+
+    #[test]
+    fn semantic_similarity_too_fast_is_bot_even_when_correct() {
+        let r = registry();
+        let s = solution(serde_json::json!({"picks": [0, 2]}), 200);
+        let (v, _) = r.verify(&sim_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "too-fast"
+        ));
+    }
+
+    #[test]
+    fn semantic_similarity_partial_overlap_is_inconclusive() {
+        let r = registry();
+        // truth = {0, 2}, picks = {0, 1} → tp=1, fp=1, fn=1 → F1 = 0.5
+        let s = solution(serde_json::json!({"picks": [0, 1]}), 4_000);
+        let (v, _) = r.verify(&sim_challenge(), &s).unwrap();
+        assert!(
+            matches!(v, Verdict::Inconclusive { .. }),
+            "F1=0.5 should retry, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_similarity_zero_overlap_is_bot() {
+        let r = registry();
+        // truth = {0, 2}, picks = {1, 3, 4} → tp=0 → F1 = 0
+        let s = solution(serde_json::json!({"picks": [1, 3, 4]}), 4_000);
+        let (v, _) = r.verify(&sim_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "low-overlap"
+        ));
+    }
+
+    #[test]
+    fn semantic_similarity_missing_truth_indices_errors() {
+        let r = registry();
+        let c = challenge(
+            ChallengeKind::SemanticSimilarity,
+            serde_json::json!({"prompt": "x", "options": ["a"]}),
+        );
+        let s = solution(serde_json::json!({"picks": [0]}), 4_000);
+        assert!(matches!(
+            r.verify(&c, &s),
+            Err(CrucibleError::MalformedSolution(_))
+        ));
     }
 }
