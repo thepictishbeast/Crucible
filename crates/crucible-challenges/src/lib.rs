@@ -92,8 +92,43 @@ impl Registry {
     }
 }
 
-/// Image-classify verifier — stub.
+/// Image-classify verifier — the classic CAPTCHA shape.
+///
+/// Payload: `{"prompt": "select all images with a bicycle",
+/// "image_urls": ["...", "...", ...], "truth_indices": [<i>, ...]}`.
+/// Solution: `{"picks": [<i>, ...]}`. Verifier uses F1-score
+/// over the index sets + an elapsed-ms gate, same shape as
+/// SemanticSimilarity (different semantic surface; the corpus
+/// row downstream IS the labeled image-classification training
+/// data).
+///
+/// Verdict logic:
+///   * elapsed < MIN_ELAPSED_MS → Bot (too-fast — humans need
+///     time to look at the grid)
+///   * F1 >= HUMAN_F1 → Human (confidence = F1)
+///   * F1 >= INCONCLUSIVE_F1 → Inconclusive (retry harder)
+///   * F1 < INCONCLUSIVE_F1 → Bot (low-overlap)
+///
+/// Tighter MIN_ELAPSED_MS than SemanticSimilarity (1200 vs 600):
+/// looking at a 3x3 image grid takes longer than reading a word
+/// list, and scripted attackers historically blast image
+/// challenges by hashing the URLs and looking up labels in a
+/// precomputed table — the latency gate is the dominant
+/// discriminator there.
 pub struct ImageClassifyVerifier;
+
+impl ImageClassifyVerifier {
+    /// Minimum elapsed-ms a real human needs to scan the image
+    /// grid. Set higher than text-based challenges because the
+    /// visual parsing path is slower.
+    pub const MIN_ELAPSED_MS: u32 = 1_200;
+    /// F1 threshold above which the solver is judged human.
+    pub const HUMAN_F1: f64 = 0.9;
+    /// F1 threshold above which we're uncertain enough to retry
+    /// at higher difficulty rather than verdict directly.
+    pub const INCONCLUSIVE_F1: f64 = 0.5;
+}
+
 impl Verifier for ImageClassifyVerifier {
     fn kind(&self) -> ChallengeKind {
         ChallengeKind::ImageClassify
@@ -101,10 +136,86 @@ impl Verifier for ImageClassifyVerifier {
     fn verify(
         &self,
         challenge: &Challenge,
-        _solution: &Solution,
+        solution: &Solution,
     ) -> Result<(Verdict, serde_json::Value), CrucibleError> {
-        Ok((inconclusive(challenge), serde_json::Value::Null))
+        let truth_arr = challenge
+            .payload
+            .get("truth_indices")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                CrucibleError::MalformedSolution("missing truth_indices".into())
+            })?;
+        let truth: std::collections::BTreeSet<i64> =
+            truth_arr.iter().filter_map(|v| v.as_i64()).collect();
+        if truth.is_empty() {
+            return Err(CrucibleError::MalformedSolution(
+                "truth_indices empty".into(),
+            ));
+        }
+        let picks_arr = solution
+            .response
+            .get("picks")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                CrucibleError::MalformedSolution("missing picks".into())
+            })?;
+        let picks: std::collections::BTreeSet<i64> =
+            picks_arr.iter().filter_map(|v| v.as_i64()).collect();
+
+        let gt = serde_json::json!({"truth_indices": truth_arr});
+
+        if solution.elapsed_ms < Self::MIN_ELAPSED_MS {
+            return Ok((
+                Verdict::Bot {
+                    confidence: 0.9,
+                    reason: Some("too-fast".into()),
+                },
+                gt,
+            ));
+        }
+
+        let f1 = f1_score(&truth, &picks);
+        if f1 >= Self::HUMAN_F1 {
+            return Ok((
+                Verdict::Human {
+                    confidence: f1 as f32,
+                },
+                gt,
+            ));
+        }
+        if f1 >= Self::INCONCLUSIVE_F1 {
+            return Ok((inconclusive(challenge), gt));
+        }
+        Ok((
+            Verdict::Bot {
+                confidence: (1.0 - f1) as f32,
+                reason: Some("low-overlap".into()),
+            },
+            gt,
+        ))
     }
+}
+
+/// F1-score between a curator-authored truth set and a
+/// user-submitted picks set. Shared helper for set-overlap
+/// verifiers (SemanticSimilarity, ImageClassify, future
+/// DrawingReconstruct).
+///
+/// F1 = 2 * precision * recall / (precision + recall).
+/// Empty picks → F1 = 0 (zero recall).
+fn f1_score(
+    truth: &std::collections::BTreeSet<i64>,
+    picks: &std::collections::BTreeSet<i64>,
+) -> f64 {
+    let tp = truth.intersection(picks).count() as f64;
+    if tp == 0.0 {
+        return 0.0;
+    }
+    let fp = picks.difference(truth).count() as f64;
+    let fn_ = truth.difference(picks).count() as f64;
+    let p = tp / (tp + fp);
+    let r = tp / (tp + fn_);
+    2.0 * p * r / (p + r)
 }
 
 /// Semantic-similarity verifier — set-overlap impl.
@@ -176,18 +287,7 @@ impl Verifier for SemanticSimilarityVerifier {
 
         let gt = serde_json::json!({"truth_indices": truth_arr});
 
-        // F1 = 2 * precision * recall / (precision + recall).
-        // Empty picks → F1 = 0 (zero recall).
-        let tp = truth.intersection(&picks).count() as f64;
-        let fp = picks.difference(&truth).count() as f64;
-        let fn_ = truth.difference(&picks).count() as f64;
-        let f1 = if tp == 0.0 {
-            0.0
-        } else {
-            let p = tp / (tp + fp);
-            let r = tp / (tp + fn_);
-            2.0 * p * r / (p + r)
-        };
+        let f1 = f1_score(&truth, &picks);
 
         if solution.elapsed_ms < Self::MIN_ELAPSED_MS {
             return Ok((
@@ -509,7 +609,6 @@ mod tests {
     fn stub_verifiers_return_inconclusive() {
         let r = registry();
         for k in [
-            ChallengeKind::ImageClassify,
             ChallengeKind::AudioTranscribe,
             ChallengeKind::DrawingReconstruct,
         ] {
@@ -596,6 +695,75 @@ mod tests {
             r.verify(&c, &s),
             Err(CrucibleError::MalformedSolution(_))
         ));
+    }
+
+    fn image_classify_challenge() -> Challenge {
+        challenge(
+            ChallengeKind::ImageClassify,
+            serde_json::json!({
+                "prompt": "select all images with a bicycle",
+                "image_urls": ["/a.jpg", "/b.jpg", "/c.jpg", "/d.jpg", "/e.jpg"],
+                "truth_indices": [0, 3]
+            }),
+        )
+    }
+
+    #[test]
+    fn image_classify_exact_match_is_human() {
+        let r = registry();
+        let s = solution(serde_json::json!({"picks": [0, 3]}), 4_500);
+        let (v, gt) = r.verify(&image_classify_challenge(), &s).unwrap();
+        assert!(matches!(v, Verdict::Human { .. }));
+        assert_eq!(gt, serde_json::json!({"truth_indices": [0, 3]}));
+    }
+
+    #[test]
+    fn image_classify_too_fast_is_bot_even_when_correct() {
+        let r = registry();
+        // Correct picks but submitted faster than a human can
+        // parse a 3x3 image grid → scripted attacker.
+        let s = solution(serde_json::json!({"picks": [0, 3]}), 500);
+        let (v, _) = r.verify(&image_classify_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "too-fast"
+        ));
+    }
+
+    #[test]
+    fn image_classify_partial_overlap_is_inconclusive() {
+        let r = registry();
+        // truth = {0, 3}, picks = {0, 1} → F1 = 0.5 → retry harder.
+        let s = solution(serde_json::json!({"picks": [0, 1]}), 4_500);
+        let (v, _) = r.verify(&image_classify_challenge(), &s).unwrap();
+        assert!(matches!(v, Verdict::Inconclusive { .. }));
+    }
+
+    #[test]
+    fn image_classify_zero_overlap_is_bot() {
+        let r = registry();
+        let s = solution(serde_json::json!({"picks": [1, 2, 4]}), 4_500);
+        let (v, _) = r.verify(&image_classify_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "low-overlap"
+        ));
+    }
+
+    #[test]
+    fn image_classify_min_elapsed_is_tighter_than_semantic() {
+        // Documented invariant: image grids take longer to scan
+        // than word lists, so the latency floor is higher.
+        assert!(
+            ImageClassifyVerifier::MIN_ELAPSED_MS
+                > SemanticSimilarityVerifier::MIN_ELAPSED_MS
+        );
     }
 
     fn injection_challenge(is_injection: bool) -> Challenge {
