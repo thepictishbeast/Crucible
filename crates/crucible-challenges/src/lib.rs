@@ -16,9 +16,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use crucible_core::{
-    Challenge, ChallengeKind, CrucibleError, Difficulty, Solution, Verdict,
-};
+use crucible_core::{Challenge, ChallengeKind, CrucibleError, Difficulty, Solution, Verdict};
 
 /// Per-kind verifier trait. Stateless — verifiers consult the
 /// challenge payload + the solution.
@@ -87,9 +85,9 @@ impl Registry {
         if solution.submitted_at > challenge.expires_at {
             return Err(CrucibleError::Expired(challenge.id.clone()));
         }
-        let v = self
-            .get(challenge.kind)
-            .ok_or_else(|| CrucibleError::Internal(format!("no verifier for {:?}", challenge.kind)))?;
+        let v = self.get(challenge.kind).ok_or_else(|| {
+            CrucibleError::Internal(format!("no verifier for {:?}", challenge.kind))
+        })?;
         v.verify(challenge, solution)
     }
 }
@@ -173,9 +171,7 @@ impl Verifier for MathArithmeticVerifier {
             "-" => a - b,
             "*" => a * b,
             other => {
-                return Err(CrucibleError::MalformedSolution(format!(
-                    "bad op {other}"
-                )));
+                return Err(CrucibleError::MalformedSolution(format!("bad op {other}")));
             }
         };
         let got = solution
@@ -338,10 +334,7 @@ mod tests {
         );
         let mut s = solution(serde_json::json!({"answer": 2}), 1_000);
         s.submitted_at = datetime!(2026-05-19 00:03:00 UTC); // past expiry
-        assert!(matches!(
-            r.verify(&c, &s),
-            Err(CrucibleError::Expired(_))
-        ));
+        assert!(matches!(r.verify(&c, &s), Err(CrucibleError::Expired(_))));
     }
 
     #[test]
