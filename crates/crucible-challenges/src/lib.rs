@@ -532,8 +532,48 @@ impl Verifier for MathArithmeticVerifier {
     }
 }
 
-/// Drawing-reconstruct verifier — stub.
+/// Drawing-reconstruct verifier — connect-the-dots geometry.
+///
+/// Payload: `{"prompt": "trace the triangle",
+/// "target_points": [[x,y], ...], "tolerance_px": 30}`.
+/// Solution: `{"points": [[x,y], ...]}`. Verifier:
+///
+/// 1. Length must match exactly (one user point per target).
+/// 2. For each (target, user) pair, compute Euclidean
+///    pixel distance.
+/// 3. Count points within `tolerance_px`.
+/// 4. ratio = within / total.
+///    * elapsed < MIN_ELAPSED_MS → Bot (too-fast)
+///    * ratio == 1.0 → Human (confidence 0.95)
+///    * ratio >= 0.7 → Inconclusive (retry harder)
+///    * ratio < 0.7 → Bot (low-overlap)
+///
+/// Why connect-the-dots not free-form drawing: stroke-based
+/// drawing requires image-similarity (model in the loop) which
+/// the substrate keeps OUT of bot-screening to preserve the
+/// deterministic, replay-auditable verdict path. A future
+/// stroke-fingerprint verifier can land as a separate variant
+/// when the LFI corpus has enough labeled drawings to train
+/// an external similarity model.
+///
+/// Tolerance unit is PIXELS (CSS px, the substrate's canonical
+/// unit). Curator picks tolerance based on the canvas size and
+/// target shape complexity.
 pub struct DrawingReconstructVerifier;
+
+impl DrawingReconstructVerifier {
+    /// Minimum elapsed-ms a real human needs to tap N points
+    /// in order. ~250ms per point is the slowest realistic
+    /// human cadence; 4-point shapes need ~1s.
+    pub const MIN_ELAPSED_MS: u32 = 1_000;
+    /// Within-tolerance ratio above which the solver is judged
+    /// human.
+    pub const HUMAN_RATIO: f64 = 0.999;
+    /// Within-tolerance ratio above which we retry harder
+    /// rather than verdict.
+    pub const INCONCLUSIVE_RATIO: f64 = 0.7;
+}
+
 impl Verifier for DrawingReconstructVerifier {
     fn kind(&self) -> ChallengeKind {
         ChallengeKind::DrawingReconstruct
@@ -541,10 +581,107 @@ impl Verifier for DrawingReconstructVerifier {
     fn verify(
         &self,
         challenge: &Challenge,
-        _solution: &Solution,
+        solution: &Solution,
     ) -> Result<(Verdict, serde_json::Value), CrucibleError> {
-        Ok((inconclusive(challenge), serde_json::Value::Null))
+        let target_arr = challenge
+            .payload
+            .get("target_points")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                CrucibleError::MalformedSolution("missing target_points".into())
+            })?;
+        let tolerance_px = challenge
+            .payload
+            .get("tolerance_px")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(30.0);
+        let user_arr = solution
+            .response
+            .get("points")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing points".into()))?;
+
+        let targets = parse_points(target_arr)?;
+        let users = parse_points(user_arr)?;
+
+        let gt = serde_json::json!({"target_points": target_arr});
+
+        if targets.is_empty() {
+            return Err(CrucibleError::MalformedSolution(
+                "target_points empty".into(),
+            ));
+        }
+        if users.len() != targets.len() {
+            return Ok((
+                Verdict::Bot {
+                    confidence: 0.9,
+                    reason: Some("wrong-point-count".into()),
+                },
+                gt,
+            ));
+        }
+        if solution.elapsed_ms < Self::MIN_ELAPSED_MS {
+            return Ok((
+                Verdict::Bot {
+                    confidence: 0.85,
+                    reason: Some("too-fast".into()),
+                },
+                gt,
+            ));
+        }
+        let within = targets
+            .iter()
+            .zip(users.iter())
+            .filter(|(t, u)| euclidean(**t, **u) <= tolerance_px)
+            .count();
+        let ratio = within as f64 / targets.len() as f64;
+
+        if ratio >= Self::HUMAN_RATIO {
+            return Ok((Verdict::Human { confidence: 0.95 }, gt));
+        }
+        if ratio >= Self::INCONCLUSIVE_RATIO {
+            return Ok((inconclusive(challenge), gt));
+        }
+        Ok((
+            Verdict::Bot {
+                confidence: (1.0 - ratio) as f32,
+                reason: Some("low-overlap".into()),
+            },
+            gt,
+        ))
     }
+}
+
+/// Parse a JSON array of `[x, y]` pairs into `Vec<(f64, f64)>`.
+/// Rejects malformed entries (non-array element, wrong length,
+/// non-numeric coordinate).
+fn parse_points(arr: &[serde_json::Value]) -> Result<Vec<(f64, f64)>, CrucibleError> {
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let pair = v.as_array().ok_or_else(|| {
+            CrucibleError::MalformedSolution(format!("point[{i}] is not an array"))
+        })?;
+        if pair.len() != 2 {
+            return Err(CrucibleError::MalformedSolution(format!(
+                "point[{i}] must have exactly 2 coordinates, got {}",
+                pair.len()
+            )));
+        }
+        let x = pair[0].as_f64().ok_or_else(|| {
+            CrucibleError::MalformedSolution(format!("point[{i}].x is not numeric"))
+        })?;
+        let y = pair[1].as_f64().ok_or_else(|| {
+            CrucibleError::MalformedSolution(format!("point[{i}].y is not numeric"))
+        })?;
+        out.push((x, y));
+    }
+    Ok(out)
+}
+
+fn euclidean(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dx = a.0 - b.0;
+    let dy = a.1 - b.1;
+    (dx * dx + dy * dy).sqrt()
 }
 
 /// Prompt-injection-detect verifier.
@@ -743,19 +880,9 @@ mod tests {
         assert!(matches!(r.verify(&c, &s), Err(CrucibleError::Expired(_))));
     }
 
-    #[test]
-    fn stub_verifiers_return_inconclusive() {
-        let r = registry();
-        for k in [ChallengeKind::DrawingReconstruct] {
-            let c = challenge(k, serde_json::Value::Null);
-            let s = solution(serde_json::Value::Null, 1_000);
-            let (v, _) = r.verify(&c, &s).unwrap();
-            assert!(
-                matches!(v, Verdict::Inconclusive { .. }),
-                "{k:?} should be inconclusive in stub state"
-            );
-        }
-    }
+    // All six verifiers now have real implementations; the
+    // stub_verifiers_return_inconclusive sweep that used to live
+    // here is gone. Each verifier carries its own targeted tests.
 
     fn sim_challenge() -> Challenge {
         challenge(
@@ -830,6 +957,148 @@ mod tests {
             r.verify(&c, &s),
             Err(CrucibleError::MalformedSolution(_))
         ));
+    }
+
+    fn drawing_challenge() -> Challenge {
+        challenge(
+            ChallengeKind::DrawingReconstruct,
+            serde_json::json!({
+                "prompt": "trace the triangle",
+                "target_points": [[100.0, 100.0], [200.0, 100.0], [150.0, 180.0]],
+                "tolerance_px": 30.0
+            }),
+        )
+    }
+
+    #[test]
+    fn drawing_exact_match_is_human() {
+        let r = registry();
+        let s = solution(
+            serde_json::json!({"points": [[100.0, 100.0], [200.0, 100.0], [150.0, 180.0]]}),
+            2_000,
+        );
+        let (v, _) = r.verify(&drawing_challenge(), &s).unwrap();
+        assert!(matches!(v, Verdict::Human { .. }));
+    }
+
+    #[test]
+    fn drawing_within_tolerance_is_human() {
+        let r = registry();
+        // Each user point within 30px of its target.
+        let s = solution(
+            serde_json::json!({"points": [[105.0, 98.0], [198.0, 103.0], [152.0, 177.0]]}),
+            2_000,
+        );
+        let (v, _) = r.verify(&drawing_challenge(), &s).unwrap();
+        assert!(matches!(v, Verdict::Human { .. }));
+    }
+
+    #[test]
+    fn drawing_wrong_point_count_is_bot() {
+        let r = registry();
+        let s = solution(
+            serde_json::json!({"points": [[100.0, 100.0], [200.0, 100.0]]}),
+            2_000,
+        );
+        let (v, _) = r.verify(&drawing_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "wrong-point-count"
+        ));
+    }
+
+    #[test]
+    fn drawing_too_fast_is_bot_even_when_correct() {
+        let r = registry();
+        let s = solution(
+            serde_json::json!({"points": [[100.0, 100.0], [200.0, 100.0], [150.0, 180.0]]}),
+            300,
+        );
+        let (v, _) = r.verify(&drawing_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "too-fast"
+        ));
+    }
+
+    #[test]
+    fn drawing_all_off_target_is_bot() {
+        let r = registry();
+        let s = solution(
+            serde_json::json!({"points": [[500.0, 500.0], [600.0, 500.0], [550.0, 600.0]]}),
+            2_000,
+        );
+        let (v, _) = r.verify(&drawing_challenge(), &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "low-overlap"
+        ));
+    }
+
+    #[test]
+    fn drawing_partial_overlap_is_inconclusive() {
+        let r = registry();
+        // 4-point challenge so 3-of-4 (0.75) lands above the
+        // 0.7 inconclusive floor while not hitting the 0.999
+        // human threshold.
+        let c = challenge(
+            ChallengeKind::DrawingReconstruct,
+            serde_json::json!({
+                "target_points": [
+                    [100.0, 100.0],
+                    [200.0, 100.0],
+                    [200.0, 200.0],
+                    [100.0, 200.0]
+                ],
+                "tolerance_px": 30.0
+            }),
+        );
+        // 3 within tolerance; 1 way off → ratio 0.75 → retry harder.
+        let s = solution(
+            serde_json::json!({
+                "points": [
+                    [102.0, 99.0],
+                    [198.0, 101.0],
+                    [201.0, 198.0],
+                    [500.0, 500.0]
+                ]
+            }),
+            2_000,
+        );
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(
+            matches!(v, Verdict::Inconclusive { .. }),
+            "ratio 0.75 should retry, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn drawing_malformed_point_errors() {
+        let r = registry();
+        let c = drawing_challenge();
+        let s = solution(
+            serde_json::json!({"points": [[100.0], [200.0, 100.0], [150.0, 180.0]]}),
+            2_000,
+        );
+        assert!(matches!(
+            r.verify(&c, &s),
+            Err(CrucibleError::MalformedSolution(_))
+        ));
+    }
+
+    #[test]
+    fn euclidean_distance_examples() {
+        assert!((euclidean((0.0, 0.0), (3.0, 4.0)) - 5.0).abs() < 1e-9);
+        assert_eq!(euclidean((1.0, 1.0), (1.0, 1.0)), 0.0);
     }
 
     fn audio_challenge(truth: &str, max_edit_distance: u64) -> Challenge {
