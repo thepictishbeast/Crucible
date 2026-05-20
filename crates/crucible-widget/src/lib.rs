@@ -187,9 +187,7 @@ async fn fetch_json(
     let body_js = JsValue::from_str(&body_str);
     opts.set_body(&body_js);
     let request = web_sys::Request::new_with_str_and_init(url, &opts)?;
-    request
-        .headers()
-        .set("content-type", "application/json")?;
+    request.headers().set("content-type", "application/json")?;
     let resp_value =
         wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await?;
     let resp: web_sys::Response = resp_value.dyn_into()?;
@@ -214,21 +212,15 @@ fn render_challenge_form(
     mount.set_inner_html("");
     match kind {
         "math-arithmetic" => render_math_form(document, mount, challenge, base_path)?,
-        "prompt-injection-detect" => {
-            render_injection_form(document, mount, challenge, base_path)?
-        }
+        "prompt-injection-detect" => render_injection_form(document, mount, challenge, base_path)?,
         "semantic-similarity" => {
             render_picks_form(document, mount, challenge, base_path, PicksKind::Text)?
         }
         "image-classify" => {
             render_picks_form(document, mount, challenge, base_path, PicksKind::Image)?
         }
-        "audio-transcribe" => {
-            render_audio_form(document, mount, challenge, base_path)?
-        }
-        "drawing-reconstruct" => {
-            render_drawing_form(document, mount, challenge, base_path)?
-        }
+        "audio-transcribe" => render_audio_form(document, mount, challenge, base_path)?,
+        "drawing-reconstruct" => render_drawing_form(document, mount, challenge, base_path)?,
         other => {
             let p = document.create_element("p")?;
             p.set_text_content(Some(&format!(
@@ -250,8 +242,16 @@ fn render_math_form(
     base_path: &str,
 ) -> Result<(), JsValue> {
     use wasm_bindgen::JsCast;
-    let a = challenge.payload.get("a").and_then(|v| v.as_i64()).unwrap_or(0);
-    let b = challenge.payload.get("b").and_then(|v| v.as_i64()).unwrap_or(0);
+    let a = challenge
+        .payload
+        .get("a")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let b = challenge
+        .payload
+        .get("b")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let op = challenge
         .payload
         .get("op")
@@ -294,14 +294,8 @@ fn render_math_form(
         let document = document_clone.clone();
         let base_path = base_path.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = submit_math(
-                &document,
-                &mount,
-                &challenge_id,
-                &base_path,
-                load_time_ms,
-            )
-            .await
+            if let Err(e) =
+                submit_math(&document, &mount, &challenge_id, &base_path, load_time_ms).await
             {
                 let _ = update_status(&document, &mount, &format!("Error: {e:?}"));
             }
@@ -352,10 +346,11 @@ fn render_injection_form(
     safe_button.set_id("crucible-inj-safe");
     mount.append_child(&safe_button)?;
 
-    let unsafe_button: web_sys::HtmlButtonElement = document
-        .create_element("button")?
-        .dyn_into()
-        .map_err(|_| JsValue::from_str("button cast"))?;
+    let unsafe_button: web_sys::HtmlButtonElement =
+        document
+            .create_element("button")?
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("button cast"))?;
     unsafe_button.set_text_content(Some("Unsafe"));
     unsafe_button.set_id("crucible-inj-unsafe");
     mount.append_child(&unsafe_button)?;
@@ -537,10 +532,7 @@ async fn submit_picks(
     let event_init = web_sys::CustomEventInit::new();
     let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
     event_init.set_detail(&detail);
-    let event = web_sys::CustomEvent::new_with_event_init_dict(
-        "crucible-verdict",
-        &event_init,
-    )?;
+    let event = web_sys::CustomEvent::new_with_event_init_dict("crucible-verdict", &event_init)?;
     mount.dispatch_event(&event)?;
     let _ = picks; // keep alive — already serialized into body
     Ok(())
@@ -674,10 +666,7 @@ async fn submit_audio(
     let event_init = web_sys::CustomEventInit::new();
     let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
     event_init.set_detail(&detail);
-    let event = web_sys::CustomEvent::new_with_event_init_dict(
-        "crucible-verdict",
-        &event_init,
-    )?;
+    let event = web_sys::CustomEvent::new_with_event_init_dict("crucible-verdict", &event_init)?;
     mount.dispatch_event(&event)?;
     Ok(())
 }
@@ -780,8 +769,8 @@ fn render_drawing_form(
         let document_clone = document.clone();
         let mount_clone = mount.clone();
         let button_clone = button.clone();
-        let on_click = wasm_bindgen::closure::Closure::wrap(Box::new(
-            move |event: web_sys::MouseEvent| {
+        let on_click =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::MouseEvent| {
                 let rect = canvas_clone.get_bounding_client_rect();
                 let x = (event.client_x() as f64) - rect.left();
                 let y = (event.client_y() as f64) - rect.top();
@@ -798,8 +787,8 @@ fn render_drawing_form(
                 if picks.borrow().len() >= target_count {
                     button_clone.set_disabled(false);
                 }
-            },
-        ) as Box<dyn FnMut(web_sys::MouseEvent)>);
+            })
+                as Box<dyn FnMut(web_sys::MouseEvent)>);
         canvas.set_onclick(Some(on_click.as_ref().unchecked_ref()));
         on_click.forget();
     }
@@ -869,10 +858,7 @@ async fn submit_drawing(
     let event_init = web_sys::CustomEventInit::new();
     let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
     event_init.set_detail(&detail);
-    let event = web_sys::CustomEvent::new_with_event_init_dict(
-        "crucible-verdict",
-        &event_init,
-    )?;
+    let event = web_sys::CustomEvent::new_with_event_init_dict("crucible-verdict", &event_init)?;
     mount.dispatch_event(&event)?;
     Ok(())
 }
@@ -904,10 +890,7 @@ async fn submit_injection(
     let event_init = web_sys::CustomEventInit::new();
     let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
     event_init.set_detail(&detail);
-    let event = web_sys::CustomEvent::new_with_event_init_dict(
-        "crucible-verdict",
-        &event_init,
-    )?;
+    let event = web_sys::CustomEvent::new_with_event_init_dict("crucible-verdict", &event_init)?;
     mount.dispatch_event(&event)?;
     Ok(())
 }
@@ -959,13 +942,9 @@ async fn submit_math(
     // Emit a CustomEvent so host pages can react without
     // polling the mount DOM.
     let event_init = web_sys::CustomEventInit::new();
-    let detail = serde_wasm_bindgen::to_value(&parsed)
-        .unwrap_or(JsValue::NULL);
+    let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
     event_init.set_detail(&detail);
-    let event = web_sys::CustomEvent::new_with_event_init_dict(
-        "crucible-verdict",
-        &event_init,
-    )?;
+    let event = web_sys::CustomEvent::new_with_event_init_dict("crucible-verdict", &event_init)?;
     mount.dispatch_event(&event)?;
     Ok(())
 }
@@ -977,11 +956,7 @@ fn update_status(
     msg: &str,
 ) -> Result<(), JsValue> {
     use wasm_bindgen::JsCast;
-    if let Some(node) = mount
-        .query_selector("#crucible-status")
-        .ok()
-        .flatten()
-    {
+    if let Some(node) = mount.query_selector("#crucible-status").ok().flatten() {
         if let Ok(el) = node.dyn_into::<web_sys::HtmlElement>() {
             el.set_text_content(Some(msg));
         }
@@ -995,7 +970,9 @@ fn now_iso_utc() -> String {
     // a fixed epoch string if Date isn't available (shouldn't
     // happen in any real browser).
     let date = js_sys::Date::new_0();
-    date.to_iso_string().as_string().unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_owned())
+    date.to_iso_string()
+        .as_string()
+        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_owned())
 }
 
 /// Friendly slug of the supported ChallengeKind variants.
@@ -1023,8 +1000,7 @@ mod tests {
         // support a kind the server doesn't recognize.
         for slug in SUPPORTED_KIND_SLUGS {
             let value = serde_json::json!(slug);
-            let parsed: Result<crucible_core::ChallengeKind, _> =
-                serde_json::from_value(value);
+            let parsed: Result<crucible_core::ChallengeKind, _> = serde_json::from_value(value);
             assert!(
                 parsed.is_ok(),
                 "{slug:?} doesn't round-trip through ChallengeKind"

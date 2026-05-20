@@ -142,9 +142,7 @@ impl Verifier for ImageClassifyVerifier {
             .payload
             .get("truth_indices")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                CrucibleError::MalformedSolution("missing truth_indices".into())
-            })?;
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing truth_indices".into()))?;
         let truth: std::collections::BTreeSet<i64> =
             truth_arr.iter().filter_map(|v| v.as_i64()).collect();
         if truth.is_empty() {
@@ -156,9 +154,7 @@ impl Verifier for ImageClassifyVerifier {
             .response
             .get("picks")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                CrucibleError::MalformedSolution("missing picks".into())
-            })?;
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing picks".into()))?;
         let picks: std::collections::BTreeSet<i64> =
             picks_arr.iter().filter_map(|v| v.as_i64()).collect();
 
@@ -266,10 +262,8 @@ impl Verifier for SemanticSimilarityVerifier {
             .get("truth_indices")
             .and_then(|v| v.as_array())
             .ok_or_else(|| CrucibleError::MalformedSolution("missing truth_indices".into()))?;
-        let truth: std::collections::BTreeSet<i64> = truth_arr
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .collect();
+        let truth: std::collections::BTreeSet<i64> =
+            truth_arr.iter().filter_map(|v| v.as_i64()).collect();
         if truth.is_empty() {
             return Err(CrucibleError::MalformedSolution(
                 "truth_indices empty".into(),
@@ -280,10 +274,8 @@ impl Verifier for SemanticSimilarityVerifier {
             .get("picks")
             .and_then(|v| v.as_array())
             .ok_or_else(|| CrucibleError::MalformedSolution("missing picks".into()))?;
-        let picks: std::collections::BTreeSet<i64> = picks_arr
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .collect();
+        let picks: std::collections::BTreeSet<i64> =
+            picks_arr.iter().filter_map(|v| v.as_i64()).collect();
 
         let gt = serde_json::json!({"truth_indices": truth_arr});
 
@@ -299,7 +291,12 @@ impl Verifier for SemanticSimilarityVerifier {
             ));
         }
         if f1 >= Self::HUMAN_F1 {
-            return Ok((Verdict::Human { confidence: f1 as f32 }, gt));
+            return Ok((
+                Verdict::Human {
+                    confidence: f1 as f32,
+                },
+                gt,
+            ));
         }
         if f1 >= Self::INCONCLUSIVE_F1 {
             return Ok((inconclusive(challenge), gt));
@@ -367,9 +364,7 @@ impl Verifier for AudioTranscribeVerifier {
             .response
             .get("transcript")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                CrucibleError::MalformedSolution("missing transcript".into())
-            })?;
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing transcript".into()))?;
 
         let truth_norm = normalize_transcript(truth);
         let user_norm = normalize_transcript(user_transcript);
@@ -587,9 +582,7 @@ impl Verifier for DrawingReconstructVerifier {
             .payload
             .get("target_points")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                CrucibleError::MalformedSolution("missing target_points".into())
-            })?;
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing target_points".into()))?;
         let tolerance_px = challenge
             .payload
             .get("tolerance_px")
@@ -732,16 +725,12 @@ impl Verifier for PromptInjectionDetectVerifier {
             .payload
             .get("is_injection")
             .and_then(|v| v.as_bool())
-            .ok_or_else(|| {
-                CrucibleError::MalformedSolution("missing is_injection".into())
-            })?;
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing is_injection".into()))?;
         let verdict_str = solution
             .response
             .get("verdict")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                CrucibleError::MalformedSolution("missing verdict".into())
-            })?;
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing verdict".into()))?;
         let user_says_injection = match verdict_str {
             "unsafe" => true,
             "safe" => false,
@@ -1204,7 +1193,10 @@ mod tests {
     #[test]
     fn normalize_transcript_examples() {
         assert_eq!(normalize_transcript("Hello, World!"), "hello world");
-        assert_eq!(normalize_transcript("  multiple   spaces  "), "multiple spaces");
+        assert_eq!(
+            normalize_transcript("  multiple   spaces  "),
+            "multiple spaces"
+        );
         assert_eq!(normalize_transcript(""), "");
         assert_eq!(normalize_transcript("CamelCase"), "camelcase");
     }
@@ -1282,10 +1274,7 @@ mod tests {
     fn image_classify_min_elapsed_is_tighter_than_semantic() {
         // Documented invariant: image grids take longer to scan
         // than word lists, so the latency floor is higher.
-        assert!(
-            ImageClassifyVerifier::MIN_ELAPSED_MS
-                > SemanticSimilarityVerifier::MIN_ELAPSED_MS
-        );
+        assert!(ImageClassifyVerifier::MIN_ELAPSED_MS > SemanticSimilarityVerifier::MIN_ELAPSED_MS);
     }
 
     fn injection_challenge(is_injection: bool) -> Challenge {

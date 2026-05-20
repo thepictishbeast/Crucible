@@ -331,7 +331,11 @@ mod tests {
         assert_eq!(manifest.writer, "crucible-corpus");
         assert_eq!(
             manifest.patterns,
-            vec!["a-first".to_owned(), "m-middle".to_owned(), "z-last".to_owned()]
+            vec![
+                "a-first".to_owned(),
+                "m-middle".to_owned(),
+                "z-last".to_owned()
+            ]
         );
         let read = std::fs::read_to_string(dir.join("index.json")).expect("read");
         let on_disk: CorpusManifest = serde_json::from_str(&read).expect("parse");

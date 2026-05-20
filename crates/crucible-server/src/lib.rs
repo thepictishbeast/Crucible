@@ -226,9 +226,7 @@ impl JsonCuratedBank {
         let challenges = v
             .get("challenges")
             .and_then(|c| c.as_array())
-            .ok_or_else(|| {
-                CrucibleError::Internal("curated bank missing challenges array".into())
-            })?
+            .ok_or_else(|| CrucibleError::Internal("curated bank missing challenges array".into()))?
             .clone();
         if challenges.is_empty() {
             return Err(CrucibleError::Internal(
@@ -245,9 +243,8 @@ impl JsonCuratedBank {
     /// Construct by reading the file at `path`. Convenience
     /// wrapper around `from_str` + std::fs::read_to_string.
     pub fn from_path(path: &std::path::Path) -> Result<Self, CrucibleError> {
-        let raw = std::fs::read_to_string(path).map_err(|e| {
-            CrucibleError::Internal(format!("read {}: {e}", path.display()))
-        })?;
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| CrucibleError::Internal(format!("read {}: {e}", path.display())))?;
         Self::from_str(&raw)
     }
 }
@@ -270,14 +267,9 @@ impl ChallengeBank for JsonCuratedBank {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let idx = (n as usize) % self.challenges.len();
         let entry = &self.challenges[idx];
-        let payload = entry
-            .get("payload")
-            .cloned()
-            .ok_or_else(|| {
-                CrucibleError::Internal(format!(
-                    "curated bank entry[{idx}] missing payload"
-                ))
-            })?;
+        let payload = entry.get("payload").cloned().ok_or_else(|| {
+            CrucibleError::Internal(format!("curated bank entry[{idx}] missing payload"))
+        })?;
         let now = time::OffsetDateTime::now_utc();
         // Slug derives from the kind so IDs are human-skimmable
         // in logs across kinds.
@@ -621,8 +613,7 @@ mod tests {
         // handler maps to Verify(500). Accept either 200 or
         // 500 — what matters here is that pending was consumed.
         assert!(
-            resp.status() == StatusCode::OK
-                || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
+            resp.status() == StatusCode::OK || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
         );
         // The challenge was consumed regardless.
         assert!(state.pending.read().await.is_empty());
@@ -673,7 +664,10 @@ attribution = "ephemeral"
             AttributionPolicy::Ephemeral
         ));
         // Unknown tenant → curated default.
-        assert!(matches!(resolve("unconfigured"), AttributionPolicy::Curated));
+        assert!(matches!(
+            resolve("unconfigured"),
+            AttributionPolicy::Curated
+        ));
     }
 
     #[test]
@@ -726,11 +720,10 @@ attribution = "made-up-policy"
 
     #[test]
     fn multi_bank_dispatches_by_kind() {
-        let bank = MultiBank::new()
-            .register(
-                ChallengeKind::MathArithmetic,
-                Box::new(StaticMathBank::default()),
-            );
+        let bank = MultiBank::new().register(
+            ChallengeKind::MathArithmetic,
+            Box::new(StaticMathBank::default()),
+        );
         let r = bank
             .issue(ChallengeKind::MathArithmetic, Difficulty::Medium, "acme")
             .unwrap();

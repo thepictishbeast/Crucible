@@ -24,9 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use crucible_server::{
-    router, AppState, JsonCuratedBank, MultiBank, ServerConfig, StaticMathBank,
-};
+use crucible_server::{router, AppState, JsonCuratedBank, MultiBank, ServerConfig, StaticMathBank};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,10 +94,7 @@ fn build_state() -> Result<std::sync::Arc<AppState>, Box<dyn std::error::Error>>
                             // from re-parsing the kind field).
                             let raw = std::fs::read_to_string(&p)?;
                             let v: serde_json::Value = serde_json::from_str(&raw)?;
-                            let kind_str = v
-                                .get("kind")
-                                .and_then(|k| k.as_str())
-                                .unwrap_or("");
+                            let kind_str = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                             let kind: crucible_core::ChallengeKind =
                                 serde_json::from_value(serde_json::json!(kind_str))?;
                             multi = multi.register(kind, Box::new(bank));
@@ -191,11 +186,7 @@ fn spawn_flusher(state: Arc<AppState>, dir: PathBuf, flush_secs: u64) {
                     );
                 }
                 Err(e) => {
-                    eprintln!(
-                        "crucible-serve: flush failed ({}): {}",
-                        target.display(),
-                        e
-                    );
+                    eprintln!("crucible-serve: flush failed ({}): {}", target.display(), e);
                 }
             }
         }

@@ -11,9 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use crucible_core::{AttributionPolicy, ChallengeKind};
-use crucible_server::{
-    router, AppState, JsonCuratedBank, MultiBank, StaticMathBank,
-};
+use crucible_server::{router, AppState, JsonCuratedBank, MultiBank, StaticMathBank};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -54,11 +52,7 @@ async fn body_json(resp: Response<Body>) -> serde_json::Value {
     serde_json::from_slice(&body).expect("json")
 }
 
-async fn post(
-    state: Arc<AppState>,
-    uri: &str,
-    body: serde_json::Value,
-) -> Response<Body> {
+async fn post(state: Arc<AppState>, uri: &str, body: serde_json::Value) -> Response<Body> {
     let app = router(state);
     let req = Request::builder()
         .uri(uri)
@@ -164,10 +158,7 @@ async fn semantic_curated_round_trip_produces_human_verdict() {
 
     let drained = state.drain_captured().await;
     assert_eq!(drained.len(), 1);
-    assert_eq!(
-        drained[0].challenge.kind,
-        ChallengeKind::SemanticSimilarity
-    );
+    assert_eq!(drained[0].challenge.kind, ChallengeKind::SemanticSimilarity);
 }
 
 #[tokio::test]
