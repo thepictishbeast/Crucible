@@ -23,6 +23,7 @@ members = [
     "crates/crucible-core",
     "crates/crucible-challenges",
     "crates/crucible-corpus",
+    "crates/crucible-server",
 ]
 
 [workspace.package]
@@ -34,11 +35,15 @@ repository = "https://github.com/thepictishbeast/Crucible"
 [workspace.dependencies]
 crucible-core       = { path = "crates/crucible-core" }
 crucible-challenges = { path = "crates/crucible-challenges" }
+crucible-corpus     = { path = "crates/crucible-corpus" }
 
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror  = "2"
 time       = { version = "0.3", features = ["serde", "serde-well-known", "macros"] }
+axum       = { version = "0.7", default-features = false, features = ["http1", "tokio", "json"] }
+tokio      = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 
 [profile.release]
 lto = "thin"
