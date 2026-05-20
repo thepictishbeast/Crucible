@@ -425,6 +425,84 @@ impl AppState {
     }
 }
 
+/// Outcome of one flush cycle. Returned by [`try_flush_once`] so
+/// callers (the bin's periodic flusher; tests) can observe what
+/// happened without parsing log lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlushOutcome {
+    /// Captured buffer was empty; nothing to do.
+    NothingToDo,
+    /// Successfully wrote N corpus patterns to the timestamped
+    /// subdirectory under the flush-dir.
+    Wrote {
+        /// Pattern count written.
+        patterns: usize,
+        /// Subdirectory path the patterns landed in.
+        target: std::path::PathBuf,
+    },
+    /// Write failed; tuples re-queued for next cycle.
+    Failed {
+        /// Subdirectory path the write attempted.
+        target: std::path::PathBuf,
+        /// Error message.
+        error: String,
+        /// Number of tuples re-queued.
+        requeued: usize,
+    },
+}
+
+/// Run one corpus-flush cycle: drain captured tuples, convert to
+/// CorpusPatterns, write to a fresh RFC-3339-timestamped subdir
+/// of `flush_dir`. On write failure, re-queue the drained tuples
+/// back into AppState.captured (front-prepended) so the next
+/// cycle retries.
+///
+/// Extracted from the bin's spawn_flusher loop so:
+///   - Integration tests can exercise the flush flow directly.
+///   - Future callers (graceful-shutdown drain → final write
+///     → requeue-on-fail; admin "force flush now" endpoint;
+///     etc.) reuse the same code path.
+pub async fn try_flush_once(
+    state: &AppState,
+    flush_dir: &std::path::Path,
+) -> FlushOutcome {
+    let captured = state.drain_captured().await;
+    if captured.is_empty() {
+        return FlushOutcome::NothingToDo;
+    }
+    let patterns: Vec<crucible_corpus::CorpusPattern> = captured
+        .iter()
+        .filter_map(|t| crucible_corpus::to_pattern(t).ok())
+        .collect();
+    if patterns.is_empty() {
+        // No patterns to write (every tuple ineligible per
+        // attribution policy or non-human verdict). Tuples are
+        // dropped — that's the documented Ephemeral/NotHuman
+        // contract; no requeue needed.
+        return FlushOutcome::NothingToDo;
+    }
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into())
+        .replace(':', "");
+    let target = flush_dir.join(format!("flush-{ts}"));
+    match crucible_corpus::write_corpus_dir(&patterns, &target) {
+        Ok(_) => FlushOutcome::Wrote {
+            patterns: patterns.len(),
+            target,
+        },
+        Err(e) => {
+            let requeued = captured.len();
+            state.requeue_captured(captured).await;
+            FlushOutcome::Failed {
+                target,
+                error: e.to_string(),
+                requeued,
+            }
+        }
+    }
+}
+
 /// Build the axum router. Mount under a base path like
 /// `/crucible` via `.nest("/crucible", crucible_server::router(...))`.
 pub fn router(state: Arc<AppState>) -> Router {

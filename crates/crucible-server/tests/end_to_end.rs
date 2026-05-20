@@ -11,7 +11,9 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use crucible_core::{AttributionPolicy, ChallengeKind};
-use crucible_server::{router, AppState, JsonCuratedBank, MultiBank, StaticMathBank};
+use crucible_server::{
+    router, try_flush_once, AppState, FlushOutcome, JsonCuratedBank, MultiBank, StaticMathBank,
+};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -262,4 +264,125 @@ async fn multiple_challenges_can_run_concurrently() {
     )
     .await;
     assert_eq!(state.pending.read().await.len(), 2);
+}
+
+fn tmpdir(label: &str) -> std::path::PathBuf {
+    let pid = std::process::id();
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!("crucible-flush-{label}-{pid}-{n}"))
+}
+
+#[tokio::test]
+async fn try_flush_once_empty_buffer_is_nothing_to_do() {
+    let state = AppState::with_math_bank();
+    let dir = tmpdir("empty");
+    let outcome = try_flush_once(&state, &dir).await;
+    assert!(matches!(outcome, FlushOutcome::NothingToDo));
+}
+
+#[tokio::test]
+async fn try_flush_once_writes_human_verdicts_to_disk() {
+    let state = state_with_math_and_semantic();
+
+    // Drive a math challenge to a Human verdict so the buffer
+    // holds a real captured tuple.
+    let resp = post(
+        state.clone(),
+        "/challenge",
+        serde_json::json!({
+            "kind": "math-arithmetic",
+            "difficulty": "medium",
+            "tenant-id": "acme"
+        }),
+    )
+    .await;
+    let challenge = body_json(resp).await;
+    let challenge_id = challenge["id"].as_str().unwrap().to_owned();
+    let a = challenge["payload"]["a"].as_i64().unwrap();
+    let b = challenge["payload"]["b"].as_i64().unwrap();
+    let op = challenge["payload"]["op"].as_str().unwrap();
+    let truth = match op {
+        "+" => a + b,
+        "-" => a - b,
+        "*" => a * b,
+        _ => unreachable!(),
+    };
+    let _ = post(
+        state.clone(),
+        "/solve",
+        serde_json::json!({
+            "challenge-id": challenge_id,
+            "response": {"answer": truth},
+            "submitted-at": "2026-05-20T19:00:00Z",
+            "elapsed-ms": 2_500u32
+        }),
+    )
+    .await;
+
+    let dir = tmpdir("wrote");
+    let outcome = try_flush_once(&state, &dir).await;
+    match outcome {
+        FlushOutcome::Wrote { patterns, target } => {
+            assert_eq!(patterns, 1);
+            assert!(target.exists(), "target dir should exist after Wrote");
+            assert!(target.join("index.json").exists(), "manifest should land");
+        }
+        other => panic!("expected Wrote, got {other:?}"),
+    }
+    // Buffer is now empty.
+    assert!(state.captured.read().await.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn try_flush_once_requeues_on_write_failure() {
+    let state = state_with_math_and_semantic();
+    // Drive one Human verdict into the buffer.
+    let resp = post(
+        state.clone(),
+        "/challenge",
+        serde_json::json!({
+            "kind": "math-arithmetic",
+            "difficulty": "medium",
+            "tenant-id": "acme"
+        }),
+    )
+    .await;
+    let challenge = body_json(resp).await;
+    let challenge_id = challenge["id"].as_str().unwrap().to_owned();
+    let a = challenge["payload"]["a"].as_i64().unwrap();
+    let b = challenge["payload"]["b"].as_i64().unwrap();
+    let op = challenge["payload"]["op"].as_str().unwrap();
+    let truth = match op {
+        "+" => a + b,
+        "-" => a - b,
+        "*" => a * b,
+        _ => unreachable!(),
+    };
+    let _ = post(
+        state.clone(),
+        "/solve",
+        serde_json::json!({
+            "challenge-id": challenge_id,
+            "response": {"answer": truth},
+            "submitted-at": "2026-05-20T19:00:00Z",
+            "elapsed-ms": 2_500u32
+        }),
+    )
+    .await;
+    assert_eq!(state.captured.read().await.len(), 1);
+
+    // Force write failure: point the flusher at /proc which is
+    // read-only on Linux. write_corpus_dir mkdir-all fails.
+    let outcome = try_flush_once(&state, std::path::Path::new("/proc/cannot-write")).await;
+    match outcome {
+        FlushOutcome::Failed { requeued, .. } => {
+            assert_eq!(requeued, 1, "one tuple should be re-queued");
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    // Buffer holds the requeued tuple.
+    assert_eq!(state.captured.read().await.len(), 1);
 }
