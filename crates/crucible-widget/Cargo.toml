@@ -32,10 +32,13 @@ version = "0.3"
 features = [
     "Document",
     "Element",
+    "Node",
+    "NodeList",
     "HtmlElement",
     "HtmlInputElement",
     "HtmlFormElement",
     "HtmlButtonElement",
+    "HtmlImageElement",
     "Event",
     "EventTarget",
     "CustomEvent",

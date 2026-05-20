@@ -217,6 +217,12 @@ fn render_challenge_form(
         "prompt-injection-detect" => {
             render_injection_form(document, mount, challenge, base_path)?
         }
+        "semantic-similarity" => {
+            render_picks_form(document, mount, challenge, base_path, PicksKind::Text)?
+        }
+        "image-classify" => {
+            render_picks_form(document, mount, challenge, base_path, PicksKind::Image)?
+        }
         other => {
             let p = document.create_element("p")?;
             p.set_text_content(Some(&format!(
@@ -384,6 +390,177 @@ fn render_injection_form(
     bind_button(&safe_button, "safe");
     bind_button(&unsafe_button, "unsafe");
     Ok(())
+}
+
+/// Discriminator for the shared picks-form renderer.
+/// SemanticSimilarity uses Text labels; ImageClassify uses Image
+/// thumbnails. Both produce the same `{"picks": [i,i,...]}` body
+/// shape on submit.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy)]
+enum PicksKind {
+    Text,
+    Image,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_picks_form(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge: &crucible_core::Challenge,
+    base_path: &str,
+    picks_kind: PicksKind,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+
+    let prompt_text = challenge
+        .payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no prompt)");
+    let options: Vec<serde_json::Value> = challenge
+        .payload
+        .get(match picks_kind {
+            PicksKind::Text => "options",
+            PicksKind::Image => "image_urls",
+        })
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let heading = document.create_element("p")?;
+    heading.set_text_content(Some(prompt_text));
+    mount.append_child(&heading)?;
+
+    let list = document.create_element("ul")?;
+    list.set_attribute("style", "list-style:none;padding:0;")?;
+    for (i, opt) in options.iter().enumerate() {
+        let li = document.create_element("li")?;
+        let label = document.create_element("label")?;
+        label.set_attribute("style", "display:inline-flex;gap:.5em;align-items:center;")?;
+        let checkbox: web_sys::HtmlInputElement = document
+            .create_element("input")?
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("input cast"))?;
+        checkbox.set_type("checkbox");
+        checkbox.set_attribute("data-crucible-index", &i.to_string())?;
+        checkbox.set_class_name("crucible-pick");
+        label.append_child(&checkbox)?;
+        match picks_kind {
+            PicksKind::Text => {
+                let text = opt.as_str().unwrap_or("").to_owned();
+                let span = document.create_element("span")?;
+                span.set_text_content(Some(&text));
+                label.append_child(&span)?;
+            }
+            PicksKind::Image => {
+                let src = opt.as_str().unwrap_or("").to_owned();
+                let img = document.create_element("img")?;
+                img.set_attribute("src", &src)?;
+                img.set_attribute("alt", &format!("option {i}"))?;
+                img.set_attribute("style", "max-width:120px;max-height:120px;")?;
+                label.append_child(&img)?;
+            }
+        }
+        li.append_child(&label)?;
+        list.append_child(&li)?;
+    }
+    mount.append_child(&list)?;
+
+    let button: web_sys::HtmlButtonElement = document
+        .create_element("button")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("button cast"))?;
+    button.set_text_content(Some("Submit"));
+    mount.append_child(&button)?;
+
+    let status = document.create_element("p")?;
+    status.set_id("crucible-status");
+    mount.append_child(&status)?;
+
+    let load_time_ms = now_ms_or_zero();
+    let challenge_id = challenge.id.clone();
+    let mount_clone = mount.clone();
+    let document_clone = document.clone();
+    let base_path = base_path.to_owned();
+
+    let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+        let challenge_id = challenge_id.clone();
+        let mount = mount_clone.clone();
+        let document = document_clone.clone();
+        let base_path = base_path.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) =
+                submit_picks(&document, &mount, &challenge_id, &base_path, load_time_ms).await
+            {
+                let _ = update_status(&document, &mount, &format!("Error: {e:?}"));
+            }
+        });
+    }) as Box<dyn FnMut()>);
+    button.set_onclick(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn submit_picks(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge_id: &str,
+    base_path: &str,
+    load_time_ms: f64,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    let elapsed_ms = (now_ms_or_zero() - load_time_ms).max(0.0) as u32;
+    let submitted_at = now_iso_utc();
+    let picks = collect_picks(mount)?;
+
+    let body = build_solve_request_json(
+        challenge_id,
+        serde_json::json!({"picks": picks}),
+        &submitted_at,
+        elapsed_ms,
+    );
+    let url = join_url(base_path, "solve");
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let resp = fetch_json(&window, &url, &body).await?;
+    let parsed: SolveResponseBody = serde_wasm_bindgen::from_value(resp)
+        .map_err(|e| JsValue::from_str(&format!("parse verdict: {e}")))?;
+    update_status(document, mount, &verdict_summary(&parsed.verdict))?;
+
+    let event_init = web_sys::CustomEventInit::new();
+    let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
+    event_init.set_detail(&detail);
+    let event = web_sys::CustomEvent::new_with_event_init_dict(
+        "crucible-verdict",
+        &event_init,
+    )?;
+    mount.dispatch_event(&event)?;
+    let _ = picks; // keep alive — already serialized into body
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn collect_picks(mount: &web_sys::Element) -> Result<Vec<i64>, JsValue> {
+    use wasm_bindgen::JsCast;
+    let nodes = mount.query_selector_all(".crucible-pick")?;
+    let mut out = Vec::new();
+    for i in 0..nodes.length() {
+        let Some(node) = nodes.item(i) else { continue };
+        let Ok(input) = node.dyn_into::<web_sys::HtmlInputElement>() else {
+            continue;
+        };
+        if !input.checked() {
+            continue;
+        }
+        let idx_attr = input
+            .get_attribute("data-crucible-index")
+            .unwrap_or_default();
+        if let Ok(idx) = idx_attr.parse::<i64>() {
+            out.push(idx);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(target_arch = "wasm32")]
