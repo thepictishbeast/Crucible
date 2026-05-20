@@ -226,6 +226,9 @@ fn render_challenge_form(
         "audio-transcribe" => {
             render_audio_form(document, mount, challenge, base_path)?
         }
+        "drawing-reconstruct" => {
+            render_drawing_form(document, mount, challenge, base_path)?
+        }
         other => {
             let p = document.create_element("p")?;
             p.set_text_content(Some(&format!(
@@ -668,6 +671,201 @@ async fn submit_audio(
         .map_err(|e| JsValue::from_str(&format!("parse verdict: {e}")))?;
     update_status(document, mount, &verdict_summary(&parsed.verdict))?;
 
+    let event_init = web_sys::CustomEventInit::new();
+    let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
+    event_init.set_detail(&detail);
+    let event = web_sys::CustomEvent::new_with_event_init_dict(
+        "crucible-verdict",
+        &event_init,
+    )?;
+    mount.dispatch_event(&event)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_drawing_form(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge: &crucible_core::Challenge,
+    base_path: &str,
+) -> Result<(), JsValue> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+
+    let prompt = challenge
+        .payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tap the points in order:");
+    let targets: Vec<(f64, f64)> = challenge
+        .payload
+        .get("target_points")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let pair = p.as_array()?;
+                    let x = pair.first()?.as_f64()?;
+                    let y = pair.get(1)?.as_f64()?;
+                    Some((x, y))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if targets.is_empty() {
+        let p = document.create_element("p")?;
+        p.set_text_content(Some("Drawing challenge missing target_points."));
+        mount.append_child(&p)?;
+        return Ok(());
+    }
+    let max_x = targets.iter().map(|(x, _)| *x).fold(0.0f64, f64::max);
+    let max_y = targets.iter().map(|(_, y)| *y).fold(0.0f64, f64::max);
+    let pad: f64 = 30.0;
+    let w = (max_x + pad).ceil() as u32;
+    let h = (max_y + pad).ceil() as u32;
+
+    let heading = document.create_element("p")?;
+    heading.set_text_content(Some(prompt));
+    mount.append_child(&heading)?;
+
+    let canvas: web_sys::HtmlCanvasElement = document
+        .create_element("canvas")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("canvas cast"))?;
+    canvas.set_width(w);
+    canvas.set_height(h);
+    canvas.set_attribute("style", "border:1px solid #888;touch-action:none;")?;
+    mount.append_child(&canvas)?;
+
+    let ctx: web_sys::CanvasRenderingContext2d = canvas
+        .get_context("2d")?
+        .ok_or_else(|| JsValue::from_str("no 2d context"))?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("ctx cast"))?;
+
+    // Draw the target dots — numbered so the user knows tap order.
+    for (i, (x, y)) in targets.iter().enumerate() {
+        ctx.begin_path();
+        ctx.arc(*x, *y, 8.0, 0.0, std::f64::consts::TAU)?;
+        ctx.set_fill_style_str("#bbb");
+        ctx.fill();
+        ctx.set_fill_style_str("#222");
+        ctx.fill_text(&(i + 1).to_string(), *x - 3.0, *y + 4.0)?;
+    }
+
+    let button: web_sys::HtmlButtonElement = document
+        .create_element("button")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("button cast"))?;
+    button.set_text_content(Some("Submit"));
+    button.set_disabled(true);
+    mount.append_child(&button)?;
+
+    let status = document.create_element("p")?;
+    status.set_id("crucible-status");
+    status.set_text_content(Some(&format!("0 / {} points tapped", targets.len())));
+    mount.append_child(&status)?;
+
+    let load_time_ms = now_ms_or_zero();
+    let target_count = targets.len();
+    let picks: Rc<RefCell<Vec<(f64, f64)>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Click handler: capture each tap, draw a marker, update
+    // status, enable Submit when full.
+    {
+        let picks = picks.clone();
+        let ctx = ctx.clone();
+        let canvas_clone = canvas.clone();
+        let document_clone = document.clone();
+        let mount_clone = mount.clone();
+        let button_clone = button.clone();
+        let on_click = wasm_bindgen::closure::Closure::wrap(Box::new(
+            move |event: web_sys::MouseEvent| {
+                let rect = canvas_clone.get_bounding_client_rect();
+                let x = (event.client_x() as f64) - rect.left();
+                let y = (event.client_y() as f64) - rect.top();
+                picks.borrow_mut().push((x, y));
+                ctx.begin_path();
+                let _ = ctx.arc(x, y, 5.0, 0.0, std::f64::consts::TAU);
+                ctx.set_fill_style_str("#0a84ff");
+                ctx.fill();
+                let _ = update_status(
+                    &document_clone,
+                    &mount_clone,
+                    &format!("{} / {} points tapped", picks.borrow().len(), target_count),
+                );
+                if picks.borrow().len() >= target_count {
+                    button_clone.set_disabled(false);
+                }
+            },
+        ) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        canvas.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        on_click.forget();
+    }
+
+    // Submit handler.
+    {
+        let picks = picks.clone();
+        let challenge_id = challenge.id.clone();
+        let mount_clone = mount.clone();
+        let document_clone = document.clone();
+        let base_path = base_path.to_owned();
+        let on_submit = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            let picks = picks.clone();
+            let challenge_id = challenge_id.clone();
+            let mount = mount_clone.clone();
+            let document = document_clone.clone();
+            let base_path = base_path.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let p = picks.borrow().clone();
+                if let Err(e) = submit_drawing(
+                    &document,
+                    &mount,
+                    &challenge_id,
+                    &base_path,
+                    load_time_ms,
+                    &p,
+                )
+                .await
+                {
+                    let _ = update_status(&document, &mount, &format!("Error: {e:?}"));
+                }
+            });
+        }) as Box<dyn FnMut()>);
+        button.set_onclick(Some(on_submit.as_ref().unchecked_ref()));
+        on_submit.forget();
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn submit_drawing(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge_id: &str,
+    base_path: &str,
+    load_time_ms: f64,
+    points: &[(f64, f64)],
+) -> Result<(), JsValue> {
+    let elapsed_ms = (now_ms_or_zero() - load_time_ms).max(0.0) as u32;
+    let submitted_at = now_iso_utc();
+    let picks_json: Vec<serde_json::Value> = points
+        .iter()
+        .map(|(x, y)| serde_json::json!([x, y]))
+        .collect();
+    let body = build_solve_request_json(
+        challenge_id,
+        serde_json::json!({"points": picks_json}),
+        &submitted_at,
+        elapsed_ms,
+    );
+    let url = join_url(base_path, "solve");
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let resp = fetch_json(&window, &url, &body).await?;
+    let parsed: SolveResponseBody = serde_wasm_bindgen::from_value(resp)
+        .map_err(|e| JsValue::from_str(&format!("parse verdict: {e}")))?;
+    update_status(document, mount, &verdict_summary(&parsed.verdict))?;
     let event_init = web_sys::CustomEventInit::new();
     let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
     event_init.set_detail(&detail);
