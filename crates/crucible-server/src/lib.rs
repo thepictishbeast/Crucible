@@ -130,6 +130,171 @@ impl ChallengeBank for StaticMathBank {
     }
 }
 
+/// Dispatch-by-kind bank shim. Wraps a map of
+/// `ChallengeKind → Box<dyn ChallengeBank>`. On `issue()`, looks
+/// up the bank for the requested kind + delegates. If no bank
+/// is registered for the kind, returns an Internal error so
+/// `crucible-server` returns 400 Bad Request to the client.
+///
+/// The standard server topology is one MultiBank wrapping one
+/// kind-specialized bank per ChallengeKind variant the host
+/// wants to serve. This crate ships:
+///   * `StaticMathBank` for MathArithmetic
+///   * `JsonCuratedBank` for the 5 other kinds (image-classify,
+///     semantic-similarity, audio-transcribe, drawing-reconstruct,
+///     prompt-injection-detect) — curator-authored challenges
+///     loaded from a JSON file.
+#[derive(Default)]
+pub struct MultiBank {
+    inner: HashMap<ChallengeKind, Box<dyn ChallengeBank>>,
+}
+
+impl MultiBank {
+    /// Empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Register a bank for a kind. Replaces any existing entry.
+    pub fn register(mut self, kind: ChallengeKind, bank: Box<dyn ChallengeBank>) -> Self {
+        self.inner.insert(kind, bank);
+        self
+    }
+}
+
+impl ChallengeBank for MultiBank {
+    fn issue(
+        &self,
+        kind: ChallengeKind,
+        difficulty: Difficulty,
+        tenant_id: &str,
+    ) -> Result<Challenge, CrucibleError> {
+        let bank = self.inner.get(&kind).ok_or_else(|| {
+            CrucibleError::Internal(format!("no bank registered for kind {kind:?}"))
+        })?;
+        bank.issue(kind, difficulty, tenant_id)
+    }
+}
+
+/// Curator-authored challenge bank backed by a JSON file.
+///
+/// File shape:
+/// ```json
+/// {
+///   "kind": "semantic-similarity",
+///   "challenges": [
+///     {
+///       "payload": { ... kind-specific ... },
+///       "difficulty_floor": "medium"
+///     },
+///     ...
+///   ]
+/// }
+/// ```
+///
+/// On `issue()`, the bank picks the next challenge in
+/// round-robin order (monotonic counter mod len), assigns a
+/// fresh ID, stamps issued_at/expires_at, copies the requested
+/// difficulty + tenant_id, and returns. Curator-authored
+/// payload + ground truth flow through unchanged.
+///
+/// The bank refuses to serve a kind other than the one it was
+/// built with — `MultiBank` is the only correct way to route
+/// across kinds.
+pub struct JsonCuratedBank {
+    kind: ChallengeKind,
+    challenges: Vec<serde_json::Value>,
+    counter: std::sync::atomic::AtomicU64,
+}
+
+impl JsonCuratedBank {
+    /// Construct from a JSON string. Parses the file shape
+    /// documented above. Fails if the JSON is malformed, the
+    /// `kind` field is missing/invalid, or the `challenges`
+    /// array is empty (an empty bank is degenerate — would
+    /// always panic at issue time).
+    pub fn from_str(s: &str) -> Result<Self, CrucibleError> {
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| CrucibleError::Internal(format!("parse curated bank: {e}")))?;
+        let kind_str = v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| CrucibleError::Internal("curated bank missing kind".into()))?;
+        // Round-trip through the typed enum so unknown kind
+        // strings fail closed.
+        let kind: ChallengeKind = serde_json::from_value(serde_json::json!(kind_str))
+            .map_err(|e| CrucibleError::Internal(format!("invalid kind {kind_str:?}: {e}")))?;
+        let challenges = v
+            .get("challenges")
+            .and_then(|c| c.as_array())
+            .ok_or_else(|| {
+                CrucibleError::Internal("curated bank missing challenges array".into())
+            })?
+            .clone();
+        if challenges.is_empty() {
+            return Err(CrucibleError::Internal(
+                "curated bank: challenges array is empty".into(),
+            ));
+        }
+        Ok(Self {
+            kind,
+            challenges,
+            counter: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// Construct by reading the file at `path`. Convenience
+    /// wrapper around `from_str` + std::fs::read_to_string.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, CrucibleError> {
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            CrucibleError::Internal(format!("read {}: {e}", path.display()))
+        })?;
+        Self::from_str(&raw)
+    }
+}
+
+impl ChallengeBank for JsonCuratedBank {
+    fn issue(
+        &self,
+        kind: ChallengeKind,
+        difficulty: Difficulty,
+        tenant_id: &str,
+    ) -> Result<Challenge, CrucibleError> {
+        if kind != self.kind {
+            return Err(CrucibleError::Internal(format!(
+                "JsonCuratedBank({:?}) cannot serve {:?}",
+                self.kind, kind
+            )));
+        }
+        let n = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let idx = (n as usize) % self.challenges.len();
+        let entry = &self.challenges[idx];
+        let payload = entry
+            .get("payload")
+            .cloned()
+            .ok_or_else(|| {
+                CrucibleError::Internal(format!(
+                    "curated bank entry[{idx}] missing payload"
+                ))
+            })?;
+        let now = time::OffsetDateTime::now_utc();
+        // Slug derives from the kind so IDs are human-skimmable
+        // in logs across kinds.
+        let kind_slug = kind.slug();
+        let id = format!("{kind_slug}-{n:08}");
+        Ok(Challenge {
+            id,
+            kind,
+            difficulty,
+            payload,
+            issued_at: now,
+            expires_at: now + time::Duration::seconds(120),
+            tenant_id: tenant_id.to_owned(),
+        })
+    }
+}
+
 /// State shared across handler invocations.
 pub struct AppState {
     /// Issued-but-unsolved challenges. Keyed by Challenge.id.
@@ -407,6 +572,86 @@ mod tests {
         let bank = StaticMathBank::default();
         let r = bank.issue(ChallengeKind::ImageClassify, Difficulty::Medium, "acme");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn multi_bank_dispatches_by_kind() {
+        let bank = MultiBank::new()
+            .register(
+                ChallengeKind::MathArithmetic,
+                Box::new(StaticMathBank::default()),
+            );
+        let r = bank
+            .issue(ChallengeKind::MathArithmetic, Difficulty::Medium, "acme")
+            .unwrap();
+        assert_eq!(r.kind, ChallengeKind::MathArithmetic);
+        // Unregistered kind → Internal error.
+        let r = bank.issue(ChallengeKind::ImageClassify, Difficulty::Medium, "acme");
+        assert!(matches!(r, Err(CrucibleError::Internal(_))));
+    }
+
+    #[test]
+    fn json_curated_bank_round_robin_issues_curator_payloads() {
+        let json = r##"{
+            "kind": "semantic-similarity",
+            "challenges": [
+                {"payload": {"prompt": "happy",
+                             "options": ["joyful", "sad"],
+                             "truth_indices": [0]}},
+                {"payload": {"prompt": "cold",
+                             "options": ["freezing", "warm"],
+                             "truth_indices": [0]}}
+            ]
+        }"##;
+        let bank = JsonCuratedBank::from_str(json).unwrap();
+        let a = bank
+            .issue(
+                ChallengeKind::SemanticSimilarity,
+                Difficulty::Medium,
+                "acme",
+            )
+            .unwrap();
+        assert_eq!(a.payload["prompt"], "happy");
+        assert!(a.id.starts_with("semantic-similarity-"));
+        let b = bank
+            .issue(
+                ChallengeKind::SemanticSimilarity,
+                Difficulty::Medium,
+                "acme",
+            )
+            .unwrap();
+        assert_eq!(b.payload["prompt"], "cold");
+        // Round-robin wraps around.
+        let c = bank
+            .issue(
+                ChallengeKind::SemanticSimilarity,
+                Difficulty::Medium,
+                "acme",
+            )
+            .unwrap();
+        assert_eq!(c.payload["prompt"], "happy");
+    }
+
+    #[test]
+    fn json_curated_bank_refuses_wrong_kind() {
+        let json = r#"{"kind":"semantic-similarity","challenges":[{"payload":{}}]}"#;
+        let bank = JsonCuratedBank::from_str(json).unwrap();
+        let r = bank.issue(ChallengeKind::ImageClassify, Difficulty::Medium, "acme");
+        assert!(matches!(r, Err(CrucibleError::Internal(_))));
+    }
+
+    #[test]
+    fn json_curated_bank_rejects_empty_challenges() {
+        let json = r#"{"kind":"image-classify","challenges":[]}"#;
+        let r = JsonCuratedBank::from_str(json);
+        assert!(matches!(r, Err(CrucibleError::Internal(_))));
+    }
+
+    #[test]
+    fn json_curated_bank_rejects_unknown_kind() {
+        let json = r#"{"kind":"made-up-kind","challenges":[{"payload":{}}]}"#;
+        let r = JsonCuratedBank::from_str(json);
+        assert!(matches!(r, Err(CrucibleError::Internal(_))));
     }
 
     #[tokio::test]
