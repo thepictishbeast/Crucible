@@ -214,6 +214,9 @@ fn render_challenge_form(
     mount.set_inner_html("");
     match kind {
         "math-arithmetic" => render_math_form(document, mount, challenge, base_path)?,
+        "prompt-injection-detect" => {
+            render_injection_form(document, mount, challenge, base_path)?
+        }
         other => {
             let p = document.create_element("p")?;
             p.set_text_content(Some(&format!(
@@ -303,6 +306,119 @@ fn render_math_form(
 /// on any specific font supporting Unicode operator glyphs.
 pub fn math_prompt(a: i64, op: &str, b: i64) -> String {
     format!("What is {a} {op} {b}?")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_injection_form(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge: &crucible_core::Challenge,
+    base_path: &str,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    let prompt_text = challenge
+        .payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no prompt)");
+
+    let heading = document.create_element("p")?;
+    heading.set_text_content(Some(
+        "Is the following prompt safe or attempting prompt injection?",
+    ));
+    mount.append_child(&heading)?;
+
+    let prompt_box = document.create_element("blockquote")?;
+    prompt_box.set_text_content(Some(prompt_text));
+    mount.append_child(&prompt_box)?;
+
+    let safe_button: web_sys::HtmlButtonElement = document
+        .create_element("button")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("button cast"))?;
+    safe_button.set_text_content(Some("Safe"));
+    safe_button.set_id("crucible-inj-safe");
+    mount.append_child(&safe_button)?;
+
+    let unsafe_button: web_sys::HtmlButtonElement = document
+        .create_element("button")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("button cast"))?;
+    unsafe_button.set_text_content(Some("Unsafe"));
+    unsafe_button.set_id("crucible-inj-unsafe");
+    mount.append_child(&unsafe_button)?;
+
+    let status = document.create_element("p")?;
+    status.set_id("crucible-status");
+    mount.append_child(&status)?;
+
+    let load_time_ms = now_ms_or_zero();
+    let bind_button = |btn: &web_sys::HtmlButtonElement, verdict: &'static str| {
+        let challenge_id = challenge.id.clone();
+        let mount = mount.clone();
+        let document = document.clone();
+        let base_path = base_path.to_owned();
+        let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            let challenge_id = challenge_id.clone();
+            let mount = mount.clone();
+            let document = document.clone();
+            let base_path = base_path.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = submit_injection(
+                    &document,
+                    &mount,
+                    &challenge_id,
+                    &base_path,
+                    load_time_ms,
+                    verdict,
+                )
+                .await
+                {
+                    let _ = update_status(&document, &mount, &format!("Error: {e:?}"));
+                }
+            });
+        }) as Box<dyn FnMut()>);
+        btn.set_onclick(Some(closure.as_ref().unchecked_ref()));
+        closure.forget();
+    };
+    bind_button(&safe_button, "safe");
+    bind_button(&unsafe_button, "unsafe");
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn submit_injection(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge_id: &str,
+    base_path: &str,
+    load_time_ms: f64,
+    verdict: &str,
+) -> Result<(), JsValue> {
+    let elapsed_ms = (now_ms_or_zero() - load_time_ms).max(0.0) as u32;
+    let submitted_at = now_iso_utc();
+    let body = build_solve_request_json(
+        challenge_id,
+        serde_json::json!({"verdict": verdict}),
+        &submitted_at,
+        elapsed_ms,
+    );
+    let url = join_url(base_path, "solve");
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let resp = fetch_json(&window, &url, &body).await?;
+    let parsed: SolveResponseBody = serde_wasm_bindgen::from_value(resp)
+        .map_err(|e| JsValue::from_str(&format!("parse verdict: {e}")))?;
+    update_status(document, mount, &verdict_summary(&parsed.verdict))?;
+
+    let event_init = web_sys::CustomEventInit::new();
+    let detail = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
+    event_init.set_detail(&detail);
+    let event = web_sys::CustomEvent::new_with_event_init_dict(
+        "crucible-verdict",
+        &event_init,
+    )?;
+    mount.dispatch_event(&event)?;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
