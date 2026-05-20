@@ -38,6 +38,7 @@
 #![deny(unsafe_code, missing_docs)]
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 /// Build the JSON body for `POST /challenge`. Pure helper
@@ -156,8 +157,7 @@ pub async fn init(
     let challenge: crucible_core::Challenge = serde_wasm_bindgen::from_value(resp)
         .map_err(|e| JsValue::from_str(&format!("parse challenge: {e}")))?;
 
-    render_challenge_form(&document, &mount, &kind, &challenge)?;
-    let _ = challenge; // captured by closures
+    render_challenge_form(&document, &mount, &kind, &challenge, &base_path)?;
     Ok(())
 }
 
@@ -209,23 +209,186 @@ fn render_challenge_form(
     mount: &web_sys::Element,
     kind: &str,
     challenge: &crucible_core::Challenge,
+    base_path: &str,
 ) -> Result<(), JsValue> {
     mount.set_inner_html("");
-    let heading = document.create_element("p")?;
-    heading.set_text_content(Some(&format!(
-        "Crucible challenge ({kind}) — id {}",
-        challenge.id
-    )));
-    mount.append_child(&heading)?;
-    let payload_text = document.create_element("pre")?;
-    payload_text.set_text_content(Some(&challenge.payload.to_string()));
-    mount.append_child(&payload_text)?;
-    let placeholder = document.create_element("p")?;
-    placeholder.set_text_content(Some(
-        "Form-render + submit-handler flow lands in a follow-up commit.",
-    ));
-    mount.append_child(&placeholder)?;
+    match kind {
+        "math-arithmetic" => render_math_form(document, mount, challenge, base_path)?,
+        other => {
+            let p = document.create_element("p")?;
+            p.set_text_content(Some(&format!(
+                "Crucible widget: kind {other:?} form-render not implemented yet — \
+                 raw payload: {}",
+                challenge.payload
+            )));
+            mount.append_child(&p)?;
+        }
+    }
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_math_form(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge: &crucible_core::Challenge,
+    base_path: &str,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    let a = challenge.payload.get("a").and_then(|v| v.as_i64()).unwrap_or(0);
+    let b = challenge.payload.get("b").and_then(|v| v.as_i64()).unwrap_or(0);
+    let op = challenge
+        .payload
+        .get("op")
+        .and_then(|v| v.as_str())
+        .unwrap_or("+");
+
+    let heading = document.create_element("p")?;
+    heading.set_text_content(Some(&math_prompt(a, op, b)));
+    mount.append_child(&heading)?;
+
+    let input: web_sys::HtmlInputElement = document
+        .create_element("input")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("input cast"))?;
+    input.set_type("number");
+    input.set_id("crucible-math-answer");
+    mount.append_child(&input)?;
+
+    let button: web_sys::HtmlButtonElement = document
+        .create_element("button")?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("button cast"))?;
+    button.set_text_content(Some("Submit"));
+    mount.append_child(&button)?;
+
+    let status = document.create_element("p")?;
+    status.set_id("crucible-status");
+    mount.append_child(&status)?;
+
+    // Capture state for the submit handler.
+    let challenge_id = challenge.id.clone();
+    let mount_clone = mount.clone();
+    let document_clone = document.clone();
+    let base_path = base_path.to_owned();
+    let load_time_ms = now_ms_or_zero();
+
+    let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+        let challenge_id = challenge_id.clone();
+        let mount = mount_clone.clone();
+        let document = document_clone.clone();
+        let base_path = base_path.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = submit_math(
+                &document,
+                &mount,
+                &challenge_id,
+                &base_path,
+                load_time_ms,
+            )
+            .await
+            {
+                let _ = update_status(&document, &mount, &format!("Error: {e:?}"));
+            }
+        });
+    }) as Box<dyn FnMut()>);
+    button.set_onclick(Some(closure.as_ref().unchecked_ref()));
+    // Leak the closure so the JS callback stays alive for the
+    // lifetime of the widget. Cleanup happens on page unload.
+    closure.forget();
+    Ok(())
+}
+
+/// Format the math prompt as ASCII so the renderer doesn't depend
+/// on any specific font supporting Unicode operator glyphs.
+pub fn math_prompt(a: i64, op: &str, b: i64) -> String {
+    format!("What is {a} {op} {b}?")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms_or_zero() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn submit_math(
+    document: &web_sys::Document,
+    mount: &web_sys::Element,
+    challenge_id: &str,
+    base_path: &str,
+    load_time_ms: f64,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    let input: web_sys::HtmlInputElement = document
+        .get_element_by_id("crucible-math-answer")
+        .ok_or_else(|| JsValue::from_str("no answer input"))?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("input cast"))?;
+    let raw = input.value();
+    let parsed: i64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| JsValue::from_str("answer must be a whole number"))?;
+
+    let elapsed_ms = (now_ms_or_zero() - load_time_ms).max(0.0) as u32;
+    let submitted_at = now_iso_utc();
+
+    let body = build_solve_request_json(
+        challenge_id,
+        serde_json::json!({"answer": parsed}),
+        &submitted_at,
+        elapsed_ms,
+    );
+    let url = join_url(base_path, "solve");
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let resp = fetch_json(&window, &url, &body).await?;
+    let parsed: SolveResponseBody = serde_wasm_bindgen::from_value(resp)
+        .map_err(|e| JsValue::from_str(&format!("parse verdict: {e}")))?;
+    update_status(document, mount, &verdict_summary(&parsed.verdict))?;
+
+    // Emit a CustomEvent so host pages can react without
+    // polling the mount DOM.
+    let event_init = web_sys::CustomEventInit::new();
+    let detail = serde_wasm_bindgen::to_value(&parsed)
+        .unwrap_or(JsValue::NULL);
+    event_init.set_detail(&detail);
+    let event = web_sys::CustomEvent::new_with_event_init_dict(
+        "crucible-verdict",
+        &event_init,
+    )?;
+    mount.dispatch_event(&event)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn update_status(
+    _document: &web_sys::Document,
+    mount: &web_sys::Element,
+    msg: &str,
+) -> Result<(), JsValue> {
+    use wasm_bindgen::JsCast;
+    if let Some(node) = mount
+        .query_selector("#crucible-status")
+        .ok()
+        .flatten()
+    {
+        if let Ok(el) = node.dyn_into::<web_sys::HtmlElement>() {
+            el.set_text_content(Some(msg));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_iso_utc() -> String {
+    // Best-effort wall-clock RFC 3339 string. Falls back to
+    // a fixed epoch string if Date isn't available (shouldn't
+    // happen in any real browser).
+    let date = js_sys::Date::new_0();
+    date.to_iso_string().as_string().unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_owned())
 }
 
 /// Friendly slug of the supported ChallengeKind variants.
@@ -294,6 +457,13 @@ mod tests {
         assert_eq!(join_url("/crucible", "/challenge"), "/crucible/challenge");
         assert_eq!(join_url("", "challenge"), "/challenge");
         assert_eq!(join_url("/", "challenge"), "/challenge");
+    }
+
+    #[test]
+    fn math_prompt_renders_ascii() {
+        assert_eq!(math_prompt(3, "+", 5), "What is 3 + 5?");
+        assert_eq!(math_prompt(7, "*", 6), "What is 7 * 6?");
+        assert_eq!(math_prompt(10, "-", 4), "What is 10 - 4?");
     }
 
     #[test]
