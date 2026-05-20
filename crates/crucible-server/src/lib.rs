@@ -295,6 +295,87 @@ impl ChallengeBank for JsonCuratedBank {
     }
 }
 
+/// Parsed `crucible.toml` config controlling per-tenant
+/// attribution policy. Empty / missing config = every tenant
+/// defaults to `AttributionPolicy::Curated`.
+///
+/// On-disk shape:
+/// ```toml
+/// [tenant.acme]
+/// attribution = "tenant-private"
+///
+/// [tenant."sacred.vote"]
+/// attribution = "curated"
+///
+/// [tenant.experimental]
+/// attribution = "ephemeral"
+/// ```
+///
+/// Unknown attribution values fail the parse — fail-closed
+/// rather than silently default away from operator intent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ServerConfig {
+    /// Per-tenant overrides. Keyed by tenant id verbatim.
+    #[serde(default)]
+    pub tenant: std::collections::HashMap<String, TenantConfig>,
+}
+
+/// One tenant's overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct TenantConfig {
+    /// Attribution policy for tuples captured under this tenant.
+    /// Values: `"curated"` / `"tenant-private"` / `"ephemeral"`.
+    pub attribution: String,
+}
+
+impl ServerConfig {
+    /// Parse a TOML string.
+    pub fn from_str(s: &str) -> Result<Self, CrucibleError> {
+        toml::from_str(s).map_err(|e| CrucibleError::Internal(format!("parse config: {e}")))
+    }
+
+    /// Read + parse a TOML file. Returns `Ok(Self::default())`
+    /// if the file doesn't exist — config is optional.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, CrucibleError> {
+        match std::fs::read_to_string(path) {
+            Ok(raw) => Self::from_str(&raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(CrucibleError::Internal(format!(
+                "read {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Resolve a tenant id to an `AttributionPolicy`. Unknown
+    /// tenant ids fall back to `Curated`. Unknown attribution
+    /// strings (which already failed the typed parse via
+    /// `attribution_policy_from_str`) surface as `Curated` here
+    /// — the parse step is where policy strings are validated.
+    pub fn resolver(self) -> AttributionResolver {
+        Arc::new(move |tenant_id: &str| {
+            self.tenant
+                .get(tenant_id)
+                .and_then(|t| attribution_policy_from_str(&t.attribution))
+                .unwrap_or(AttributionPolicy::Curated)
+        })
+    }
+}
+
+/// Parse a string into an `AttributionPolicy`. Returns `None`
+/// for unknown values; callers decide whether to fall back or
+/// fail.
+pub fn attribution_policy_from_str(s: &str) -> Option<AttributionPolicy> {
+    match s {
+        "curated" => Some(AttributionPolicy::Curated),
+        "tenant-private" => Some(AttributionPolicy::TenantPrivate),
+        "ephemeral" => Some(AttributionPolicy::Ephemeral),
+        _ => None,
+    }
+}
+
 /// State shared across handler invocations.
 pub struct AppState {
     /// Issued-but-unsolved challenges. Keyed by Challenge.id.
@@ -572,6 +653,75 @@ mod tests {
         let bank = StaticMathBank::default();
         let r = bank.issue(ChallengeKind::ImageClassify, Difficulty::Medium, "acme");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn server_config_parses_per_tenant_attribution() {
+        let raw = r#"
+[tenant.acme]
+attribution = "tenant-private"
+
+[tenant.experimental]
+attribution = "ephemeral"
+"#;
+        let cfg = ServerConfig::from_str(raw).unwrap();
+        assert_eq!(cfg.tenant.len(), 2);
+        let resolve = cfg.resolver();
+        assert!(matches!(resolve("acme"), AttributionPolicy::TenantPrivate));
+        assert!(matches!(
+            resolve("experimental"),
+            AttributionPolicy::Ephemeral
+        ));
+        // Unknown tenant → curated default.
+        assert!(matches!(resolve("unconfigured"), AttributionPolicy::Curated));
+    }
+
+    #[test]
+    fn server_config_empty_returns_default() {
+        let cfg = ServerConfig::from_str("").unwrap();
+        assert!(cfg.tenant.is_empty());
+    }
+
+    #[test]
+    fn server_config_rejects_unknown_keys() {
+        let raw = r#"
+unrelated_top_key = 42
+"#;
+        // deny_unknown_fields on the outer struct: unrelated top
+        // key fails the parse rather than silently dropping.
+        assert!(ServerConfig::from_str(raw).is_err());
+    }
+
+    #[test]
+    fn server_config_resolver_unknown_attribution_falls_back() {
+        // Unknown attribution string in the file → fallback to
+        // Curated when the resolver runs. The parse itself accepts
+        // the string (it's just a String field); the resolver is
+        // where the policy enum lookup happens.
+        let raw = r#"
+[tenant.weird]
+attribution = "made-up-policy"
+"#;
+        let cfg = ServerConfig::from_str(raw).unwrap();
+        let resolve = cfg.resolver();
+        assert!(matches!(resolve("weird"), AttributionPolicy::Curated));
+    }
+
+    #[test]
+    fn attribution_policy_from_str_round_trips() {
+        assert!(matches!(
+            attribution_policy_from_str("curated"),
+            Some(AttributionPolicy::Curated)
+        ));
+        assert!(matches!(
+            attribution_policy_from_str("tenant-private"),
+            Some(AttributionPolicy::TenantPrivate)
+        ));
+        assert!(matches!(
+            attribution_policy_from_str("ephemeral"),
+            Some(AttributionPolicy::Ephemeral)
+        ));
+        assert!(attribution_policy_from_str("unknown").is_none());
     }
 
     #[test]

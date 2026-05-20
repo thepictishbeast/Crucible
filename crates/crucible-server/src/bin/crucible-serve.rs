@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use axum::Router;
 use crucible_server::{
-    router, AppState, JsonCuratedBank, MultiBank, StaticMathBank,
+    router, AppState, JsonCuratedBank, MultiBank, ServerConfig, StaticMathBank,
 };
 
 #[tokio::main]
@@ -128,12 +128,30 @@ fn build_state() -> Result<std::sync::Arc<AppState>, Box<dyn std::error::Error>>
         }
     }
 
+    // Per-tenant attribution: if $CRUCIBLE_CONFIG is set,
+    // parse a TOML file with [tenant.<id>] blocks; otherwise
+    // every tenant defaults to Curated.
+    let attribution = match env::var("CRUCIBLE_CONFIG") {
+        Ok(path) => {
+            let cfg = ServerConfig::from_path(std::path::Path::new(&path))?;
+            eprintln!(
+                "crucible-serve: loaded config from {path} ({} tenant override(s))",
+                cfg.tenant.len()
+            );
+            cfg.resolver()
+        }
+        Err(_) => {
+            let _ = &AttributionPolicy::Curated; // silence unused-import on the no-config path
+            Arc::new(|_: &str| AttributionPolicy::Curated)
+        }
+    };
+
     Ok(Arc::new(AppState {
         pending: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         captured: tokio::sync::RwLock::new(Vec::new()),
         registry: crucible_challenges::registry(),
         bank: Arc::new(multi),
-        attribution: Arc::new(|_| AttributionPolicy::Curated),
+        attribution,
     }))
 }
 
