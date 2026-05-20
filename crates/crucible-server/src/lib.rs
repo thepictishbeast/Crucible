@@ -405,6 +405,24 @@ impl AppState {
         let mut g = self.captured.write().await;
         std::mem::take(&mut *g)
     }
+
+    /// Push tuples back into the buffer (front-prepend). Used by
+    /// the corpus flusher on write failure — drained tuples that
+    /// couldn't be persisted re-queue for the next flush cycle.
+    ///
+    /// Order isn't load-bearing for the LFI corpus consumer
+    /// (it's a tuple SET, not a sequence), so prepending is fine.
+    /// Concurrent captures arriving during a failed flush still
+    /// land at the back of the buffer; they merge with the
+    /// re-queued set on the next drain.
+    pub async fn requeue_captured(&self, mut tuples: Vec<CapturedTuple>) {
+        if tuples.is_empty() {
+            return;
+        }
+        let mut buf = self.captured.write().await;
+        tuples.extend(std::mem::take(&mut *buf));
+        *buf = tuples;
+    }
 }
 
 /// Build the axum router. Mount under a base path like
@@ -825,5 +843,77 @@ attribution = "made-up-policy"
         let drained = state.drain_captured().await;
         assert_eq!(drained.len(), 1);
         assert!(state.captured.read().await.is_empty());
+    }
+
+    fn sample_tuple(id: &str) -> CapturedTuple {
+        let now = time::OffsetDateTime::now_utc();
+        CapturedTuple {
+            challenge: Challenge {
+                id: id.into(),
+                kind: ChallengeKind::MathArithmetic,
+                difficulty: Difficulty::Medium,
+                payload: serde_json::json!({}),
+                issued_at: now,
+                expires_at: now + time::Duration::seconds(120),
+                tenant_id: "acme".into(),
+            },
+            solution: Solution {
+                challenge_id: id.into(),
+                response: serde_json::json!({}),
+                submitted_at: now,
+                elapsed_ms: 1000,
+            },
+            ground_truth: serde_json::json!({}),
+            verdict: Verdict::Human { confidence: 0.9 },
+            attribution: AttributionPolicy::Curated,
+        }
+    }
+
+    #[tokio::test]
+    async fn requeue_captured_restores_tuples_at_buffer_front() {
+        let state = AppState::with_math_bank();
+        // Pre-existing captures (simulate live solves arriving
+        // during a failed flush attempt).
+        state.captured.write().await.push(sample_tuple("late-1"));
+        state.captured.write().await.push(sample_tuple("late-2"));
+
+        // Requeue the "drained" tuples from a failed flush.
+        state
+            .requeue_captured(vec![sample_tuple("drained-1"), sample_tuple("drained-2")])
+            .await;
+
+        // Drained tuples sit at the front, late captures behind.
+        let final_buf = state.captured.read().await;
+        assert_eq!(final_buf.len(), 4);
+        assert_eq!(final_buf[0].challenge.id, "drained-1");
+        assert_eq!(final_buf[1].challenge.id, "drained-2");
+        assert_eq!(final_buf[2].challenge.id, "late-1");
+        assert_eq!(final_buf[3].challenge.id, "late-2");
+    }
+
+    #[tokio::test]
+    async fn requeue_captured_empty_input_is_noop() {
+        let state = AppState::with_math_bank();
+        state.captured.write().await.push(sample_tuple("a"));
+        state.requeue_captured(vec![]).await;
+        let buf = state.captured.read().await;
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0].challenge.id, "a");
+    }
+
+    #[tokio::test]
+    async fn drain_then_requeue_round_trips() {
+        let state = AppState::with_math_bank();
+        state.captured.write().await.push(sample_tuple("a"));
+        state.captured.write().await.push(sample_tuple("b"));
+        let drained = state.drain_captured().await;
+        assert_eq!(drained.len(), 2);
+        assert!(state.captured.read().await.is_empty());
+        // Requeue — back to original state.
+        state.requeue_captured(drained).await;
+        let buf = state.captured.read().await;
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf[0].challenge.id, "a");
+        assert_eq!(buf[1].challenge.id, "b");
     }
 }

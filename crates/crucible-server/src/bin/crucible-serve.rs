@@ -196,14 +196,8 @@ fn spawn_flusher(state: Arc<AppState>, dir: PathBuf, flush_secs: u64) {
                         captured.len()
                     );
                     // Push the drained tuples back into the buffer
-                    // (preserved order at the front; new captures
-                    // append behind). Order isn't load-bearing for
-                    // the corpus consumer — it's a tuple set, not a
-                    // sequence — so a simple prepend works.
-                    let mut buf = state.captured.write().await;
-                    let mut requeued = captured;
-                    requeued.extend(std::mem::take(&mut *buf));
-                    *buf = requeued;
+                    // via the AppState::requeue_captured helper.
+                    state.requeue_captured(captured).await;
                 }
             }
         }
