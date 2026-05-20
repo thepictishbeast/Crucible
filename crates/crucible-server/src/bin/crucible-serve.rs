@@ -153,7 +153,10 @@ fn build_state() -> Result<std::sync::Arc<AppState>, Box<dyn std::error::Error>>
 /// Periodic background task: every `flush_secs`, drain captured
 /// tuples + write them to a fresh subdirectory of `flush_dir`.
 /// Errors are logged to stderr and do NOT terminate the server
-/// — the corpus pipeline is best-effort.
+/// — the corpus pipeline is best-effort. On write failure the
+/// drained tuples are pushed back into the AppState buffer so
+/// the next flush cycle retries; previously a transient disk
+/// error silently lost the tuples.
 fn spawn_flusher(state: Arc<AppState>, dir: PathBuf, flush_secs: u64) {
     tokio::spawn(async move {
         let interval = Duration::from_secs(flush_secs);
@@ -186,7 +189,21 @@ fn spawn_flusher(state: Arc<AppState>, dir: PathBuf, flush_secs: u64) {
                     );
                 }
                 Err(e) => {
-                    eprintln!("crucible-serve: flush failed ({}): {}", target.display(), e);
+                    eprintln!(
+                        "crucible-serve: flush failed ({}): {} — re-queueing {} tuples for next flush",
+                        target.display(),
+                        e,
+                        captured.len()
+                    );
+                    // Push the drained tuples back into the buffer
+                    // (preserved order at the front; new captures
+                    // append behind). Order isn't load-bearing for
+                    // the corpus consumer — it's a tuple set, not a
+                    // sequence — so a simple prepend works.
+                    let mut buf = state.captured.write().await;
+                    let mut requeued = captured;
+                    requeued.extend(std::mem::take(&mut *buf));
+                    *buf = requeued;
                 }
             }
         }
