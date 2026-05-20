@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use crucible_server::{router, AppState};
+use crucible_server::{
+    router, AppState, JsonCuratedBank, MultiBank, StaticMathBank,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let base_path = env::var("CRUCIBLE_BASE_PATH").unwrap_or_else(|_| "/crucible".to_owned());
 
-    let state = AppState::with_math_bank();
+    let state = build_state()?;
 
     // Optional periodic corpus flush.
     if let Ok(flush_dir) = env::var("CRUCIBLE_FLUSH_DIR") {
@@ -52,6 +54,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Wire AppState with the default math bank + any curated
+/// banks discovered under $CRUCIBLE_BANKS_DIR.
+///
+/// $CRUCIBLE_BANKS_DIR is an optional directory; if set, every
+/// `*.json` file inside is loaded as a JsonCuratedBank and
+/// registered for its declared `kind`. The discovered bank
+/// OVERRIDES any default for that kind — so a curated math
+/// bank in the dir would replace the StaticMathBank.
+///
+/// Walks one level deep only (non-recursive). Files that fail
+/// to parse log a warning to stderr and are skipped; the
+/// server continues with whichever banks DID load.
+fn build_state() -> Result<std::sync::Arc<AppState>, Box<dyn std::error::Error>> {
+    use crucible_core::AttributionPolicy;
+    use std::sync::Arc;
+
+    let mut multi = MultiBank::new().register(
+        crucible_core::ChallengeKind::MathArithmetic,
+        Box::new(StaticMathBank::default()),
+    );
+
+    if let Ok(banks_dir) = env::var("CRUCIBLE_BANKS_DIR") {
+        let dir = PathBuf::from(&banks_dir);
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                let mut paths: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+                    .collect();
+                paths.sort();
+                for p in paths {
+                    match JsonCuratedBank::from_path(&p) {
+                        Ok(bank) => {
+                            // Each curated bank carries its own kind; query it
+                            // by peeking at the parsed JSON (no public getter on
+                            // JsonCuratedBank yet, so the registration key comes
+                            // from re-parsing the kind field).
+                            let raw = std::fs::read_to_string(&p)?;
+                            let v: serde_json::Value = serde_json::from_str(&raw)?;
+                            let kind_str = v
+                                .get("kind")
+                                .and_then(|k| k.as_str())
+                                .unwrap_or("");
+                            let kind: crucible_core::ChallengeKind =
+                                serde_json::from_value(serde_json::json!(kind_str))?;
+                            multi = multi.register(kind, Box::new(bank));
+                            eprintln!(
+                                "crucible-serve: loaded curated bank for {kind_str:?} from {}",
+                                p.display()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "crucible-serve: skipped {} ({}): {}",
+                                p.display(),
+                                "bad bank",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "crucible-serve: CRUCIBLE_BANKS_DIR={banks_dir} unreadable: {e} \
+                     (continuing with math-only)"
+                );
+            }
+        }
+    }
+
+    Ok(Arc::new(AppState {
+        pending: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        captured: tokio::sync::RwLock::new(Vec::new()),
+        registry: crucible_challenges::registry(),
+        bank: Arc::new(multi),
+        attribution: Arc::new(|_| AttributionPolicy::Curated),
+    }))
 }
 
 /// Periodic background task: every `flush_secs`, drain captured
