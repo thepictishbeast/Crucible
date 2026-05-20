@@ -1,0 +1,52 @@
+[package]
+name = "crucible-widget"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Browser-side Crucible widget — compiles to WASM via wasm-pack. Renders a Challenge in a host DOM node, POSTs the Solution back to /crucible/solve, displays the Verdict."
+
+# WASM library — cdylib for wasm-bindgen, rlib so the host can
+# unit-test logic without spinning up wasm-pack.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crucible-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+
+# wasm-bindgen + web-sys are the canonical web-substrate
+# bindings. They compile against wasm32-unknown-unknown; on a
+# host without that target, only the rlib half builds.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlFormElement",
+    "HtmlButtonElement",
+    "Event",
+    "EventTarget",
+    "Window",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Headers",
+    "console",
+]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "deny"
