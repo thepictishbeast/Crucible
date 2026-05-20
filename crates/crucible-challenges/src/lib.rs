@@ -314,8 +314,36 @@ impl Verifier for SemanticSimilarityVerifier {
     }
 }
 
-/// Audio-transcribe verifier — stub.
+/// Audio-transcribe verifier — user types what they hear.
+///
+/// Payload: `{"audio_url": "/clips/x.opus", "truth": "the quick
+/// brown fox", "max_edit_distance": 3}`. Solution:
+/// `{"transcript": "the quick brown fox"}`. Verifier
+/// normalizes both strings (lowercase + collapse whitespace +
+/// strip punctuation), computes Levenshtein edit distance, and
+/// classifies via:
+///
+///   * elapsed < MIN_ELAPSED_MS → Bot (too-fast)
+///   * distance == 0 → Human (confidence 0.94)
+///   * distance <= max_edit_distance → Human (confidence
+///     interpolated by distance ratio)
+///   * distance > max_edit_distance → Bot (wrong-answer)
+///
+/// Why Levenshtein not word-set F1: transcription tasks are
+/// sensitive to word ORDER (a transposition is a real error)
+/// and to missing/inserted words. Edit distance captures both
+/// where set-overlap would silently accept.
+///
+/// MIN_ELAPSED_MS = 1500 — the audio clip itself takes ~1s for
+/// a short utterance, plus parsing + typing time. Anything
+/// faster is scripted.
 pub struct AudioTranscribeVerifier;
+
+impl AudioTranscribeVerifier {
+    /// Minimum elapsed-ms a real human needs to listen + type.
+    pub const MIN_ELAPSED_MS: u32 = 1_500;
+}
+
 impl Verifier for AudioTranscribeVerifier {
     fn kind(&self) -> ChallengeKind {
         ChallengeKind::AudioTranscribe
@@ -323,10 +351,120 @@ impl Verifier for AudioTranscribeVerifier {
     fn verify(
         &self,
         challenge: &Challenge,
-        _solution: &Solution,
+        solution: &Solution,
     ) -> Result<(Verdict, serde_json::Value), CrucibleError> {
-        Ok((inconclusive(challenge), serde_json::Value::Null))
+        let truth = challenge
+            .payload
+            .get("truth")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CrucibleError::MalformedSolution("missing truth".into()))?;
+        let max_edit_distance = challenge
+            .payload
+            .get("max_edit_distance")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let user_transcript = solution
+            .response
+            .get("transcript")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CrucibleError::MalformedSolution("missing transcript".into())
+            })?;
+
+        let truth_norm = normalize_transcript(truth);
+        let user_norm = normalize_transcript(user_transcript);
+        let distance = levenshtein(&truth_norm, &user_norm);
+
+        let gt = serde_json::json!({"truth": truth});
+
+        if solution.elapsed_ms < Self::MIN_ELAPSED_MS {
+            return Ok((
+                Verdict::Bot {
+                    confidence: 0.85,
+                    reason: Some("too-fast".into()),
+                },
+                gt,
+            ));
+        }
+        if distance == 0 {
+            return Ok((Verdict::Human { confidence: 0.94 }, gt));
+        }
+        if distance <= max_edit_distance {
+            // Linear interpolation: closer to truth → higher
+            // confidence. distance 1 with budget 3 → 0.85;
+            // distance 3 with budget 3 → 0.70.
+            let ratio = distance as f32 / (max_edit_distance.max(1) as f32);
+            let conf = 0.95 - 0.25 * ratio;
+            return Ok((Verdict::Human { confidence: conf }, gt));
+        }
+        Ok((
+            Verdict::Bot {
+                confidence: 0.85,
+                reason: Some("wrong-answer".into()),
+            },
+            gt,
+        ))
     }
+}
+
+/// Normalize a transcript for fair comparison: lowercase, strip
+/// punctuation, collapse whitespace to single spaces, trim.
+/// Mirrors the conventions used in dialogue-eval pipelines so
+/// human "Quick, brown fox." matches truth "the quick brown fox"
+/// once articles + punctuation are handled by the
+/// max_edit_distance budget rather than by hard string equality.
+fn normalize_transcript(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_space = true;
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            for low in c.to_lowercase() {
+                out.push(low);
+            }
+            last_was_space = false;
+        } else if c.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        }
+        // Other chars (punctuation) silently dropped.
+    }
+    let trimmed = out.trim();
+    trimmed.to_owned()
+}
+
+/// Levenshtein edit distance between two strings, in chars.
+/// Classic dynamic-programming impl with O(n*m) time + O(min(n,m))
+/// space (we only keep two rows of the matrix at a time).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    if a_chars.is_empty() {
+        return b_chars.len();
+    }
+    if b_chars.is_empty() {
+        return a_chars.len();
+    }
+    // Make `a` the shorter one to save space.
+    let (a, b) = if a_chars.len() <= b_chars.len() {
+        (&a_chars, &b_chars)
+    } else {
+        (&b_chars, &a_chars)
+    };
+    let mut prev: Vec<usize> = (0..=a.len()).collect();
+    let mut curr: Vec<usize> = vec![0; a.len() + 1];
+    for (j, b_ch) in b.iter().enumerate() {
+        curr[0] = j + 1;
+        for (i, a_ch) in a.iter().enumerate() {
+            let cost = if a_ch == b_ch { 0 } else { 1 };
+            curr[i + 1] = (curr[i] + 1) // insertion
+                .min(prev[i + 1] + 1) // deletion
+                .min(prev[i] + cost); // substitution
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[a.len()]
 }
 
 /// Math-arithmetic verifier — naive impl. The payload carries
@@ -608,10 +746,7 @@ mod tests {
     #[test]
     fn stub_verifiers_return_inconclusive() {
         let r = registry();
-        for k in [
-            ChallengeKind::AudioTranscribe,
-            ChallengeKind::DrawingReconstruct,
-        ] {
+        for k in [ChallengeKind::DrawingReconstruct] {
             let c = challenge(k, serde_json::Value::Null);
             let s = solution(serde_json::Value::Null, 1_000);
             let (v, _) = r.verify(&c, &s).unwrap();
@@ -695,6 +830,124 @@ mod tests {
             r.verify(&c, &s),
             Err(CrucibleError::MalformedSolution(_))
         ));
+    }
+
+    fn audio_challenge(truth: &str, max_edit_distance: u64) -> Challenge {
+        challenge(
+            ChallengeKind::AudioTranscribe,
+            serde_json::json!({
+                "audio_url": "/clips/test.opus",
+                "truth": truth,
+                "max_edit_distance": max_edit_distance
+            }),
+        )
+    }
+
+    #[test]
+    fn audio_exact_match_is_human() {
+        let r = registry();
+        let c = audio_challenge("the quick brown fox", 3);
+        let s = solution(
+            serde_json::json!({"transcript": "the quick brown fox"}),
+            3_000,
+        );
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(matches!(v, Verdict::Human { .. }));
+    }
+
+    #[test]
+    fn audio_normalization_handles_punctuation_and_case() {
+        let r = registry();
+        let c = audio_challenge("the quick brown fox", 0);
+        let s = solution(
+            serde_json::json!({"transcript": "The Quick, Brown Fox!"}),
+            3_000,
+        );
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(
+            matches!(v, Verdict::Human { .. }),
+            "punctuation+case should normalize to exact match, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn audio_within_edit_budget_is_human() {
+        let r = registry();
+        let c = audio_challenge("the quick brown fox", 3);
+        // One word swapped (`brown` → `green`) — Levenshtein distance
+        // 3 (replace b→g, r→r, o→e, w→e, n→n... wait, "brown" → "green"
+        // is more than 3). Use a single-char typo instead.
+        let s = solution(
+            serde_json::json!({"transcript": "the quik brown fox"}),
+            3_000,
+        );
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(matches!(v, Verdict::Human { .. }));
+    }
+
+    #[test]
+    fn audio_over_budget_is_bot() {
+        let r = registry();
+        let c = audio_challenge("the quick brown fox", 2);
+        let s = solution(
+            serde_json::json!({"transcript": "completely different text"}),
+            3_000,
+        );
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "wrong-answer"
+        ));
+    }
+
+    #[test]
+    fn audio_too_fast_is_bot_even_when_correct() {
+        let r = registry();
+        let c = audio_challenge("hello", 0);
+        let s = solution(serde_json::json!({"transcript": "hello"}), 500);
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(matches!(
+            v,
+            Verdict::Bot {
+                reason: Some(ref r),
+                ..
+            } if r == "too-fast"
+        ));
+    }
+
+    #[test]
+    fn audio_missing_truth_errors() {
+        let r = registry();
+        let c = challenge(
+            ChallengeKind::AudioTranscribe,
+            serde_json::json!({"audio_url": "/x.opus"}),
+        );
+        let s = solution(serde_json::json!({"transcript": "x"}), 3_000);
+        assert!(matches!(
+            r.verify(&c, &s),
+            Err(CrucibleError::MalformedSolution(_))
+        ));
+    }
+
+    #[test]
+    fn normalize_transcript_examples() {
+        assert_eq!(normalize_transcript("Hello, World!"), "hello world");
+        assert_eq!(normalize_transcript("  multiple   spaces  "), "multiple spaces");
+        assert_eq!(normalize_transcript(""), "");
+        assert_eq!(normalize_transcript("CamelCase"), "camelcase");
+    }
+
+    #[test]
+    fn levenshtein_examples() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("abc", "abc"), 0);
+        assert_eq!(levenshtein("abc", "abd"), 1); // substitution
+        assert_eq!(levenshtein("abc", "ab"), 1); // deletion
+        assert_eq!(levenshtein("abc", "abcd"), 1); // insertion
+        assert_eq!(levenshtein("kitten", "sitting"), 3); // classic
     }
 
     fn image_classify_challenge() -> Challenge {
