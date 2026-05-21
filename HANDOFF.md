@@ -39,19 +39,57 @@ pipeline (PlausiDen-LFI#8 issue tracks the matching consumer).
 
 ## What's still pending
 
-- **WASM artifact**: `crucible-widget` compiles as rlib on
-  native targets (pure helpers covered by 7 tests). The cdylib
-  half needs `wasm-pack build --target web` on a host with
-  wasm32-unknown-unknown installed — not done yet because the
-  build host this session lacks rustup + wasm32 target.
-- **Forge CMS embed primitive**: PlausiDen-Loom PR #20
-  (CmsSection::CrucibleChallenge) is open + awaiting paul's
-  merge. Once merged, any Forge site can drop a
-  {"kind":"crucible_challenge", ...} section to embed the
-  widget against a crucible-server peer.
+- **End-to-end demo tenant**: pick a tenant repo (or scaffold
+  a fresh `~/projects/crucible-demo/`), add a
+  `{"kind":"crucible_challenge", ...}` section to its
+  `cms/index.json`, copy the built widget pkg into the
+  tenant's `static/crucible-widget/`, run `forge build`,
+  verify the rendered page embeds + executes the challenge.
 - **LFI consumer-side**: PlausiDen-LFI#8 is filed for the
   matching `read_corpus_dir()` reader. That repo's Claude
   owns the work per feedback_lfi_out_of_scope_for_this_instance.
+
+## Toolchain (resolved 2026-05-21)
+
+The widget builds. To rebuild on a fresh host:
+
+```sh
+# 1. Install rustup (system Rust from apt lacks the wasm32 target):
+TMPDIR=$HOME/.cargo-install-tmp \
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  | sh -s -- -y --default-toolchain stable --no-modify-path
+#    NOTE: TMPDIR override is needed when /tmp is mounted noexec.
+# 2. Add the wasm32 target:
+$HOME/.cargo/bin/rustup target add wasm32-unknown-unknown
+# 3. Install wasm-pack with a non-/tmp CARGO_TARGET_DIR:
+CARGO_TARGET_DIR=$HOME/.cargo-install-tmp \
+  cargo install wasm-pack --locked
+
+cd crates/crucible-widget
+wasm-pack build --target web --out-dir ../../target/crucible-widget-pkg
+```
+
+Output: `target/crucible-widget-pkg/` carries
+`crucible_widget_bg.wasm` + `crucible_widget.js` + matching
+`.d.ts` + `package.json`.
+
+## Forge CMS embed primitive (shipped)
+
+`CmsSection::CrucibleChallenge` is in PlausiDen-Loom main. A
+tenant `cms/index.json` drops:
+
+```json
+{
+  "kind": "crucible_challenge",
+  "kind_id": "math-arithmetic",
+  "difficulty": "medium",
+  "server_url": "https://crucible.example/api"
+}
+```
+
+The renderer emits the `<crucible-widget>` custom element + a
+`<script type="module" src="/crucible-widget/crucible_widget.js">`
+tag. Tenants serve the built pkg from their static dir.
 
 ## What this instance won't touch
 
