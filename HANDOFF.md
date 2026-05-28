@@ -1,8 +1,6 @@
 # Handoff — for the next Crucible/LFI Claude session
 
 This repo was scaffolded 2026-05-19 by the Forge-side instance.
-Paul has a separate Claude focused on LFI/AI work; everything
-below is theirs to evolve.
 
 ## What's here (updated 2026-05-20)
 
