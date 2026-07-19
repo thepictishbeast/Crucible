@@ -2,3 +2,23 @@
 Cargo.lock
 *.swp
 .DS_Store
+# Canonical Claude/Gemini session-artifact ignore-list (see CRUFT-SEPARATION-STANDARD
+# on tank). Append to a repo's .gitignore so session scaffolding never gets tracked.
+# These belong in /tank/claude-workspace/<repo>/, not on GitHub.
+CLAUDE[0-9._-]*.md
+CLAUDE_[A-Z]*.md
+GEMINI_*.md
+GEMINI[._-]*
+claude[0-9]_*.md
+*HANDOFF*
+*handoff*
+RESUME-*.md
+SESSION-LOG*
+SESSION_LOG*
+SESSION_HANDOFF*
+SESSION-HANDOFF*
+AI-COORDINATION.md
+.remember/
+# Live coordination state — ignore only once the cross-session comms method replaces it:
+# CLAIMS.md
+# comms/from-*.md
