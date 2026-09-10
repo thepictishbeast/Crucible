@@ -14,6 +14,7 @@ use crucible_core::{AttributionPolicy, ChallengeKind};
 use crucible_server::{
     router, try_flush_once, AppState, FlushOutcome, JsonCuratedBank, MultiBank, StaticMathBank,
 };
+use std::str::FromStr as _;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 

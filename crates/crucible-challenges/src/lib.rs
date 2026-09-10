@@ -417,11 +417,9 @@ fn normalize_transcript(s: &str) -> String {
                 out.push(low);
             }
             last_was_space = false;
-        } else if c.is_whitespace() {
-            if !last_was_space {
-                out.push(' ');
-                last_was_space = true;
-            }
+        } else if c.is_whitespace() && !last_was_space {
+            out.push(' ');
+            last_was_space = true;
         }
         // Other chars (punctuation) silently dropped.
     }
@@ -1274,7 +1272,16 @@ mod tests {
     fn image_classify_min_elapsed_is_tighter_than_semantic() {
         // Documented invariant: image grids take longer to scan
         // than word lists, so the latency floor is higher.
-        assert!(ImageClassifyVerifier::MIN_ELAPSED_MS > SemanticSimilarityVerifier::MIN_ELAPSED_MS);
+        //
+        // A const-vs-const `assert!` is folded away by the compiler, so
+        // as a runtime assertion it proved nothing. `const { assert!() }`
+        // fails the BUILD if the invariant is ever broken, which is what
+        // "documented invariant" should mean.
+        const {
+            assert!(
+                ImageClassifyVerifier::MIN_ELAPSED_MS > SemanticSimilarityVerifier::MIN_ELAPSED_MS
+            );
+        }
     }
 
     fn injection_challenge(is_injection: bool) -> Challenge {

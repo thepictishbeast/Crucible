@@ -308,7 +308,7 @@ mod tests {
     fn write_corpus_dir_roundtrips_pattern_payload() {
         let p = to_pattern(&human_tuple(AttributionPolicy::TenantPrivate)).unwrap();
         let dir = tmpdir("roundtrip");
-        write_corpus_dir(&[p.clone()], &dir).expect("write");
+        write_corpus_dir(std::slice::from_ref(&p), &dir).expect("write");
         let read = std::fs::read_to_string(dir.join("crucible-abc-1.json")).expect("read");
         let parsed: CorpusPattern = serde_json::from_str(&read).expect("parse");
         assert_eq!(parsed, p);

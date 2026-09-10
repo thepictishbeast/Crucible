@@ -107,12 +107,7 @@ fn build_state() -> Result<std::sync::Arc<AppState>, Box<dyn std::error::Error>>
                             );
                         }
                         Err(e) => {
-                            eprintln!(
-                                "crucible-serve: skipped {} ({}): {}",
-                                p.display(),
-                                "bad bank",
-                                e
-                            );
+                            eprintln!("crucible-serve: skipped {} (bad bank): {e}", p.display());
                         }
                     }
                 }

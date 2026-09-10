@@ -206,13 +206,23 @@ pub struct JsonCuratedBank {
     counter: std::sync::atomic::AtomicU64,
 }
 
+/// Parse a curated challenge bank from JSON.
+///
+/// See the note on `impl FromStr for ServerConfig` — same reason.
+impl std::str::FromStr for JsonCuratedBank {
+    type Err = CrucibleError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
 impl JsonCuratedBank {
     /// Construct from a JSON string. Parses the file shape
     /// documented above. Fails if the JSON is malformed, the
     /// `kind` field is missing/invalid, or the `challenges`
     /// array is empty (an empty bank is degenerate — would
     /// always panic at issue time).
-    pub fn from_str(s: &str) -> Result<Self, CrucibleError> {
+    fn parse(s: &str) -> Result<Self, CrucibleError> {
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| CrucibleError::Internal(format!("parse curated bank: {e}")))?;
         let kind_str = v
@@ -245,7 +255,7 @@ impl JsonCuratedBank {
     pub fn from_path(path: &std::path::Path) -> Result<Self, CrucibleError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| CrucibleError::Internal(format!("read {}: {e}", path.display())))?;
-        Self::from_str(&raw)
+        Self::parse(&raw)
     }
 }
 
@@ -322,9 +332,20 @@ pub struct TenantConfig {
     pub attribution: String,
 }
 
+/// Parse a TOML server config.
+///
+/// A real `FromStr` rather than an inherent `from_str`: the inherent
+/// form shadows the trait method, so `"...".parse::<ServerConfig>()`
+/// silently did not work and clippy flagged the ambiguity.
+impl std::str::FromStr for ServerConfig {
+    type Err = CrucibleError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
 impl ServerConfig {
-    /// Parse a TOML string.
-    pub fn from_str(s: &str) -> Result<Self, CrucibleError> {
+    fn parse(s: &str) -> Result<Self, CrucibleError> {
         toml::from_str(s).map_err(|e| CrucibleError::Internal(format!("parse config: {e}")))
     }
 
@@ -332,7 +353,7 @@ impl ServerConfig {
     /// if the file doesn't exist — config is optional.
     pub fn from_path(path: &std::path::Path) -> Result<Self, CrucibleError> {
         match std::fs::read_to_string(path) {
-            Ok(raw) => Self::from_str(&raw),
+            Ok(raw) => Self::parse(&raw),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(CrucibleError::Internal(format!(
                 "read {}: {e}",
@@ -385,8 +406,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Convenience constructor wrapping the default math bank
-    /// + curated-for-everyone attribution. Hosts can construct
+    /// Convenience constructor wrapping the default math bank with
+    /// curated-for-everyone attribution. Hosts can construct
     /// `AppState` directly for non-default banks / policies.
     pub fn with_math_bank() -> Arc<Self> {
         Arc::new(Self {
@@ -462,10 +483,7 @@ pub enum FlushOutcome {
 ///   - Future callers (graceful-shutdown drain → final write
 ///     → requeue-on-fail; admin "force flush now" endpoint;
 ///     etc.) reuse the same code path.
-pub async fn try_flush_once(
-    state: &AppState,
-    flush_dir: &std::path::Path,
-) -> FlushOutcome {
+pub async fn try_flush_once(state: &AppState, flush_dir: &std::path::Path) -> FlushOutcome {
     let captured = state.drain_captured().await;
     if captured.is_empty() {
         return FlushOutcome::NothingToDo;
@@ -627,6 +645,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use std::str::FromStr as _;
     use tower::ServiceExt;
 
     async fn body_json(resp: Response) -> serde_json::Value {
