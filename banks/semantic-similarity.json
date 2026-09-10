@@ -1,0 +1,142 @@
+{
+  "_comment": [
+    "Semantic-similarity bank. Payload is {\"prompt\": <text>,",
+    "\"options\": [<text>...], \"truth_indices\": [<int>...]}; the solver",
+    "returns the indices it thinks match. Scored by F1, so partial",
+    "credit exists and a lucky single guess does not pass.",
+    "",
+    "Why sentences and not synonyms: single-word synonym sets are what a",
+    "thesaurus API solves in one call, and they teach LFI's HDLM nothing",
+    "it could not get from a word list. These are paraphrases where the",
+    "wording barely overlaps and the DISTRACTOR shares most of the",
+    "vocabulary — so surface-token similarity gives the wrong answer and",
+    "the label is only obtainable from meaning. That is the signal worth",
+    "collecting.",
+    "",
+    "Two correct of four throughout: guessing the exact pair is 1 in 6,",
+    "and the F1 threshold (0.9) means near-misses do not pass either."
+  ],
+  "kind": "semantic-similarity",
+  "challenges": [
+    {"payload": {
+      "prompt": "The meeting was moved to a later date.",
+      "options": [
+        "They pushed the meeting back.",
+        "The meeting was moved to a smaller room.",
+        "It got rescheduled for further out.",
+        "The date of the meeting was a later one than the room booking."
+      ],
+      "truth_indices": [0, 2]
+    }},
+    {"payload": {
+      "prompt": "Nobody warned us the service would be down.",
+      "options": [
+        "We had no notice of the outage.",
+        "Nobody warned us the service would be slow.",
+        "The outage came without any heads-up.",
+        "We warned nobody that the service would be down."
+      ],
+      "truth_indices": [0, 2]
+    }},
+    {"payload": {
+      "prompt": "She turned down the offer.",
+      "options": [
+        "She turned down the volume on the offer call.",
+        "She declined it.",
+        "The offer was turned down by her.",
+        "She turned around and made an offer."
+      ],
+      "truth_indices": [1, 2]
+    }},
+    {"payload": {
+      "prompt": "The invoice has not been paid yet.",
+      "options": [
+        "Payment on the invoice is still outstanding.",
+        "The invoice has not been sent yet.",
+        "They still owe us for that invoice.",
+        "The invoice was paid, not yet filed."
+      ],
+      "truth_indices": [0, 2]
+    }},
+    {"payload": {
+      "prompt": "He kept the plan to himself.",
+      "options": [
+        "He kept to the plan himself.",
+        "He did not tell anyone the plan.",
+        "The plan stayed private to him.",
+        "He kept the plan on himself, in his pocket."
+      ],
+      "truth_indices": [1, 2]
+    }},
+    {"payload": {
+      "prompt": "The results were worse than we expected.",
+      "options": [
+        "We expected worse, and got it.",
+        "They came in below what we had forecast.",
+        "The results were worse than we reported.",
+        "It underperformed against our expectations."
+      ],
+      "truth_indices": [1, 3]
+    }},
+    {"payload": {
+      "prompt": "Traffic made me late.",
+      "options": [
+        "I was late because of the traffic.",
+        "I made the traffic late.",
+        "The hold-up on the road is why I did not arrive on time.",
+        "Traffic made me leave."
+      ],
+      "truth_indices": [0, 2]
+    }},
+    {"payload": {
+      "prompt": "They cancelled the contract without notice.",
+      "options": [
+        "The contract was cancelled with no warning given.",
+        "They cancelled the notice without a contract.",
+        "It was terminated out of the blue.",
+        "They gave notice that the contract was cancelled."
+      ],
+      "truth_indices": [0, 2]
+    }},
+    {"payload": {
+      "prompt": "The backup ran but restored nothing.",
+      "options": [
+        "The backup completed and the restore came back empty.",
+        "The backup ran and restored everything.",
+        "It backed up fine; there was just nothing to bring back.",
+        "Nothing ran, so the backup restored nothing."
+      ],
+      "truth_indices": [0, 2]
+    }},
+    {"payload": {
+      "prompt": "We can start once the paperwork clears.",
+      "options": [
+        "The paperwork can start once we clear it.",
+        "Work begins as soon as the documents go through.",
+        "We are held up until the forms are approved, then we go.",
+        "We can start clearing the paperwork once we begin."
+      ],
+      "truth_indices": [1, 2]
+    }},
+    {"payload": {
+      "prompt": "Almost everyone agreed.",
+      "options": [
+        "Everyone almost agreed.",
+        "There was near-unanimous support.",
+        "All but a couple were in favour.",
+        "Almost everyone disagreed."
+      ],
+      "truth_indices": [1, 2]
+    }},
+    {"payload": {
+      "prompt": "The fix worked, but only for a while.",
+      "options": [
+        "It held for a time and then failed again.",
+        "The fix worked for a while to get it done.",
+        "It was a temporary repair — the problem came back.",
+        "The fix did not work for a while, then it did."
+      ],
+      "truth_indices": [0, 2]
+    }}
+  ]
+}
