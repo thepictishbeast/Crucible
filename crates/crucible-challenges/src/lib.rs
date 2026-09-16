@@ -462,9 +462,50 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 /// Math-arithmetic verifier — naive impl. The payload carries
 /// `{"a": n, "op": "+|-|*", "b": n}`; the solution carries the
-/// number. Exact match → Human; too-fast (< 800ms) → Bot;
-/// otherwise Inconclusive.
+/// number. Exact match → Human; too-fast → Bot; otherwise
+/// Inconclusive.
+///
+/// ## The floor has to clear the caller's clock resolution
+///
+/// This was the only verifier here whose threshold was a bare `800`
+/// rather than a named constant, and 800 turned out to be a number that
+/// could not do its job.
+///
+/// An embedder that carries the issue time in a signed token at SECONDS
+/// resolution — which plausiden.com's contact form does, because that is
+/// what fits in the token — can only ever report an elapsed time of 0,
+/// 1000, 2000… A floor anywhere in `1..=1000` is therefore not "800
+/// milliseconds of thinking", it is "not in the same wall-clock second",
+/// and a bot clears it by sleeping once.
+///
+/// It did. Two submissions, two days apart, same mailbox, two different
+/// sender names, both verdicts Human.
+///
+/// So the floor is 3 seconds: above the 1000ms quantum with room to
+/// spare, and still far below a person who has to read a form, type a
+/// name, an address and a message, and add two single digits. Timing is
+/// the honest axis here — making the ARITHMETIC harder costs a human
+/// real effort and costs a script nothing.
 pub struct MathArithmeticVerifier;
+
+impl MathArithmeticVerifier {
+    /// Faster than this and it is not a person. Named, like every other
+    /// verifier's, so it can be asserted on rather than grepped for.
+    pub const MIN_ELAPSED_MS: u32 = 3_000;
+}
+
+/// A floor inside the first second cannot distinguish a bot from a human
+/// for any embedder whose token carries whole seconds — both round to the
+/// same number, which is how an 800ms floor let a script through twice.
+///
+/// Compile-time rather than a test, deliberately: this is a property the
+/// constant must never lose, and a build that breaks is louder than a
+/// test somebody can mark ignored.
+const _: () = assert!(
+    MathArithmeticVerifier::MIN_ELAPSED_MS > 1_000,
+    "the arithmetic floor must clear a seconds-resolution clock"
+);
+
 impl Verifier for MathArithmeticVerifier {
     fn kind(&self) -> ChallengeKind {
         ChallengeKind::MathArithmetic
@@ -512,7 +553,7 @@ impl Verifier for MathArithmeticVerifier {
                 gt,
             ));
         }
-        if solution.elapsed_ms < 800 {
+        if solution.elapsed_ms < Self::MIN_ELAPSED_MS {
             return Ok((
                 Verdict::Bot {
                     confidence: 0.85,
@@ -819,10 +860,30 @@ mod tests {
             ChallengeKind::MathArithmetic,
             serde_json::json!({"a": 3, "op": "+", "b": 5}),
         );
-        let s = solution(serde_json::json!({"answer": 8}), 2_500);
+        let s = solution(serde_json::json!({"answer": 8}), 4_500);
         let (v, gt) = r.verify(&c, &s).unwrap();
         assert!(matches!(v, Verdict::Human { .. }));
         assert_eq!(gt, serde_json::json!({"answer": 8}));
+    }
+
+    #[test]
+    fn math_one_second_is_a_bot_because_that_is_all_it_ever_took() {
+        // The submission this threshold was raised for. An embedder that
+        // carries the issue time at seconds resolution reports elapsed as
+        // 0, 1000, 2000... so the old 800ms floor meant "not in the same
+        // second" and nothing more. A script that sleeps once cleared it,
+        // twice, two days apart, under two different names.
+        let r = registry();
+        let c = challenge(
+            ChallengeKind::MathArithmetic,
+            serde_json::json!({"a": 3, "op": "+", "b": 5}),
+        );
+        let s = solution(serde_json::json!({"answer": 8}), 1_000);
+        let (v, _) = r.verify(&c, &s).unwrap();
+        assert!(
+            matches!(v, Verdict::Bot { ref reason, .. } if reason.as_deref() == Some("too-fast")),
+            "one second must not read as human: {v:?}"
+        );
     }
 
     #[test]

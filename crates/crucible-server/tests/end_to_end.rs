@@ -102,7 +102,7 @@ async fn math_full_round_trip_produces_human_verdict() {
             "challenge-id": challenge_id,
             "response": {"answer": truth},
             "submitted-at": "2026-05-20T19:00:00Z",
-            "elapsed-ms": 2_500u32
+            "elapsed-ms": 4_500u32
         }),
     )
     .await;
@@ -197,7 +197,7 @@ async fn solve_wrong_answer_captures_bot_tuple() {
             "challenge-id": challenge_id,
             "response": {"answer": wrong},
             "submitted-at": "2026-05-20T19:00:00Z",
-            "elapsed-ms": 2_500u32
+            "elapsed-ms": 4_500u32
         }),
     )
     .await;
@@ -260,7 +260,7 @@ async fn multiple_challenges_can_run_concurrently() {
             "challenge-id": ids[0],
             "response": {"answer": 99},
             "submitted-at": "2026-05-20T19:00:00Z",
-            "elapsed-ms": 2_500u32
+            "elapsed-ms": 4_500u32
         }),
     )
     .await;
@@ -317,7 +317,7 @@ async fn try_flush_once_writes_human_verdicts_to_disk() {
             "challenge-id": challenge_id,
             "response": {"answer": truth},
             "submitted-at": "2026-05-20T19:00:00Z",
-            "elapsed-ms": 2_500u32
+            "elapsed-ms": 4_500u32
         }),
     )
     .await;
@@ -369,7 +369,7 @@ async fn try_flush_once_requeues_on_write_failure() {
             "challenge-id": challenge_id,
             "response": {"answer": truth},
             "submitted-at": "2026-05-20T19:00:00Z",
-            "elapsed-ms": 2_500u32
+            "elapsed-ms": 4_500u32
         }),
     )
     .await;
