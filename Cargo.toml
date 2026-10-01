@@ -25,6 +25,7 @@ members = [
     "crates/crucible-corpus",
     "crates/crucible-server",
     "crates/crucible-widget",
+    "crates/crucible-pow",
 ]
 
 [workspace.package]

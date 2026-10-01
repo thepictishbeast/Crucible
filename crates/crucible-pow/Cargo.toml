@@ -1,0 +1,25 @@
+[package]
+name = "crucible-pow"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Proof-of-work gate for public forms (ALTCHA protocol v2): mint, verify, single-use."
+
+[features]
+# Solve challenges in-process, so an embedder's own tests can submit a form
+# that passes the gate.
+test-support = []
+
+[dependencies]
+altcha = "0.2"
+base64 = "0.22"
+blake3 = "1"
+rand = "0.8"
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
